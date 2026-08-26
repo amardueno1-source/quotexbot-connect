@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.3
+// @version      0.3.4
 // @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
+// @match        http://market-qx.info/*
+// @match        http://*.market-qx.info/*
 // @match        https://market-qx.com/*
 // @match        https://*.market-qx.com/*
 // @match        https://broker-qx.com/*
@@ -16,6 +18,11 @@
 // @match        https://*.qxbroker.com/*
 // @match        https://quotex.com/*
 // @match        https://*.quotex.com/*
+// @match        https://*.quotex.app/*
+// @match        https://quotex.app/*
+// @include      *://*/demo-trade*
+// @include      *://*/live-trade*
+// @include      *://*/trade*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -23,7 +30,8 @@
 // @connect      query1.finance.yahoo.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
-// @run-at       document-idle
+// @all_frames   true
+// @run-at       document-end
 // ==/UserScript==
 
 /**
@@ -456,11 +464,11 @@
 
 (function () {
   "use strict";
-  if (window.__quotexbotHud) return;
-  window.__quotexbotHud = true;
+  try {
+  if (window.__quotexbotHudBoot) return;
+  window.__quotexbotHudBoot = true;
 
-  const scrape = globalThis.QuotexbotScrape;
-  if (!scrape) return;
+  const scrape = globalThis.QuotexbotScrape || null;
 
   const KEY = "quotexbot_tm_state";
   const MAX_AUTO = 10;
@@ -619,7 +627,7 @@
   }
 
   async function openAsset(label) {
-    const already = scrape.scrapeDocument(document);
+    const already = snapDoc();
     if ((already.asset || "").replace(/\s+/g, "").toUpperCase().includes(label.replace("/", ""))) {
       return true;
     }
@@ -642,8 +650,13 @@
     return false;
   }
 
+  function snapDoc() {
+    if (!scrape || typeof scrape.scrapeDocument !== "function") return { accountMode: "", asset: "" };
+    try { return scrape.scrapeDocument(document); } catch (_e) { return { accountMode: "", asset: "" }; }
+  }
   function clickDir(dir) {
-    const snap = scrape.scrapeDocument(document);
+    if (!scrape) return { ok: false, error: "scrape missing" };
+    const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     return dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
   }
@@ -654,7 +667,7 @@
     const p = WATCH[browseIndex % WATCH.length];
     browseIndex += 1;
     try {
-      const snap0 = scrape.scrapeDocument(document);
+      const snap0 = snapDoc();
       if (snap0.accountMode !== "demo") {
         state.auto = false;
         state.lastReason = "LIVE, auto off"; log("লাইভ অ্যাকাউন্ট দেখে অটো বন্ধ");
@@ -716,11 +729,12 @@
     }
   }
 
-  GM_addStyle(`
-    #quotexbot-hud{position:fixed;top:56px;right:16px;z-index:2147483646;width:380px;
-      background:#10141c;color:#e8eef7;border:1px solid #2a3344;border-radius:12px;
+  const HUD_CSS = `
+    #quotexbot-hud{position:fixed;top:12px;right:12px;z-index:2147483647 !important;width:380px;
+      background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
-      user-select:none}
+      user-select:none;display:block !important;visibility:visible !important;opacity:1 !important;
+      pointer-events:auto !important}
     #quotexbot-hud.mini{width:auto;padding:6px 10px}
     #quotexbot-hud .hd{display:flex;justify-content:space-between;align-items:center;
       padding:10px 12px;border-bottom:1px solid #2a3344;cursor:move}
@@ -743,14 +757,33 @@
       border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
     #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
     #quotexbot-hud .log .empty{color:#6b7787}
-  `);
+  `;
 
-  const root = document.createElement("div");
-  root.id = "quotexbot-hud";
-  document.documentElement.appendChild(root);
+  function injectCss() {
+    if (document.getElementById("quotexbot-hud-css")) return;
+    try { if (typeof GM_addStyle === "function") GM_addStyle(HUD_CSS); } catch (_e) {}
+    if (document.getElementById("quotexbot-hud-css")) return;
+    const st = document.createElement("style");
+    st.id = "quotexbot-hud-css";
+    st.textContent = HUD_CSS;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function createRoot() {
+    injectCss();
+    const old = document.getElementById("quotexbot-hud");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    const el = document.createElement("div");
+    el.id = "quotexbot-hud";
+    el.setAttribute("style", "position:fixed;top:12px;right:12px;z-index:2147483647;width:380px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:block;visibility:visible;opacity:1;pointer-events:auto;");
+    (document.body || document.documentElement).appendChild(el);
+    return el;
+  }
+
+  let root = createRoot();
 
   function render() {
-    const snap = scrape.scrapeDocument(document);
+    const snap = snapDoc();
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
@@ -787,7 +820,7 @@
     if (box) box.scrollTop = box.scrollHeight;
   }
 
-  root.addEventListener("click", (ev) => {
+  function onHudClick(ev) {
     const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
     if (!act) return;
     if (act === "mini") { state.minimized = true; saveState(state); render(); }
@@ -803,7 +836,7 @@
       saveState(state); render();
     }
     if (act === "auto") {
-      const snap = scrape.scrapeDocument(document);
+      const snap = snapDoc();
       if (state.auto) {
         state.auto = false;
         log("অটো বন্ধ");
@@ -819,13 +852,13 @@
       }
       saveState(state); render();
     }
-  });
+  }
 
   let drag = null;
-  root.addEventListener("mousedown", (ev) => {
-    if (!ev.target.closest(".hd")) return;
+  function onHudDown(ev) {
+    if (!ev.target.closest || !ev.target.closest(".hd")) return;
     drag = { x: ev.clientX - root.offsetLeft, y: ev.clientY - root.offsetTop };
-  });
+  }
   window.addEventListener("mouseup", () => { drag = null; });
   window.addEventListener("mousemove", (ev) => {
     if (!drag) return;
@@ -834,10 +867,40 @@
     root.style.right = "auto";
   });
 
+  function bindHud(el) {
+    el.addEventListener("click", onHudClick);
+    el.addEventListener("mousedown", onHudDown);
+  }
+  bindHud(root);
+
+  function ensureHud() {
+    const live = document.getElementById("quotexbot-hud");
+    if (live && live.isConnected) {
+      root = live;
+      return;
+    }
+    root = createRoot();
+    bindHud(root);
+    log("HUD আবার লাগানো হয়েছে");
+    render();
+  }
+
   setInterval(function () {
+    ensureHud();
     if (state.auto) scanWatchlist();
     else render();
-  }, 8000);
+  }, 2500);
 
+  log(scrape ? "HUD চালু v0.3.4" : "HUD চালু, scrape নেই");
   render();
+  } catch (err) {
+    try {
+      const b = document.createElement("div");
+      b.id = "quotexbot-hud";
+      b.textContent = "quotexbot error: " + (err && err.message ? err.message : err);
+      b.setAttribute("style", "position:fixed;top:12px;right:12px;z-index:2147483647;background:#7f1d1d;color:#fff;padding:12px 14px;border-radius:10px;max-width:360px;font:13px system-ui;");
+      (document.body || document.documentElement).appendChild(b);
+    } catch (_e) {}
+    try { console.error("[quotexbot]", err); } catch (_e2) {}
+  }
 })();
