@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.4
+// @version      0.3.5
 // @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -377,9 +377,11 @@
     let text = "";
     try {
       const hud = doc.getElementById && doc.getElementById("quotexbot-hud");
-      if (hud) hud.setAttribute("data-qx-skip", "1");
+      const prevDisp = hud && hud.style ? hud.style.display : "";
+      if (hud) hud.style.display = "none";
       const body = doc.body;
       if (body) text += " " + (body.innerText || body.textContent || "");
+      if (hud) hud.style.display = prevDisp || "";
       const all = body ? body.querySelectorAll("*") : [];
       for (const el of all) {
         if (el.id === "quotexbot-hud" || (el.closest && el.closest("#quotexbot-hud"))) continue;
@@ -626,27 +628,102 @@
     return best;
   }
 
-  async function openAsset(label) {
-    const already = snapDoc();
-    if ((already.asset || "").replace(/\s+/g, "").toUpperCase().includes(label.replace("/", ""))) {
+  function findSearchBox() {
+    const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"));
+    for (const el of inputs) {
+      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      const ph = ((el.getAttribute("placeholder") || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
+      if (/search|asset|pair|symbol|find|поиск|buscar|suche|recherche/i.test(ph)) return el;
+      if ((el.type || "") === "search") return el;
+    }
+    return null;
+  }
+
+  function typeIn(el, value) {
+    try { el.focus(); } catch (_e) {}
+    try {
+      const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, "value");
+      if (desc && desc.set) desc.set.call(el, value);
+      else el.value = value;
+    } catch (_e) {
+      try { el.value = value; } catch (_e2) {}
+    }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    try { el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "a" })); } catch (_e3) {}
+  }
+
+  function clickCurrentAssetHeader() {
+    const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div"));
+    let best = null, bestLen = 1e9;
+    for (const el of nodes) {
+      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      const t = (el.innerText || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 28) continue;
+      if (!/^[A-Z]{3}\s*\/\s*[A-Z]{3}/i.test(t) && !/\(\s*OTC\s*\)/i.test(t)) continue;
+      if (t.length < bestLen) { best = el; bestLen = t.length; }
+    }
+    if (best && typeof best.click === "function") {
+      best.click();
       return true;
     }
-    const chip = clickableByText(label) || clickableByText(label + " (OTC)");
+    return false;
+  }
+
+  async function openAsset(label) {
+    const compact = label.replace("/", "").toUpperCase();
+    const already = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
+    if (already.includes(compact)) return true;
+
+    let chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
     if (chip && typeof chip.click === "function") {
       chip.click();
-      await new Promise((r) => setTimeout(r, 400));
+      await sleep(400);
       const item = clickableByText(label);
       if (item && item !== chip && typeof item.click === "function") item.click();
-      await new Promise((r) => setTimeout(r, 700));
+      await sleep(700);
+      const now = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
+      if (now.includes(compact)) return true;
+    }
+
+    clickCurrentAssetHeader();
+    await sleep(500);
+    let box = findSearchBox();
+    if (!box) {
+      clickCurrentAssetHeader();
+      await sleep(400);
+      box = findSearchBox();
+    }
+    if (box) {
+      typeIn(box, label);
+      await sleep(700);
+    }
+    chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
+    if (chip && typeof chip.click === "function") {
+      chip.click();
+      await sleep(800);
       return true;
     }
     return false;
   }
 
   function tradeOpen() {
-    const t = (document.body && document.body.innerText) || "";
-    if (/you don'?t have a trade history/i.test(t)) return false;
-    if (/pending|opened|in progress/i.test(t) && /trades/i.test(t)) return true;
+    if (lastClickAt && Date.now() - lastClickAt < 65000) return true;
+    const hud = document.getElementById("quotexbot-hud");
+    const els = document.querySelectorAll("div, span, p, strong, b");
+    for (const el of els) {
+      if (hud && (el === hud || hud.contains(el))) continue;
+      let raw = "";
+      const kids = el.childNodes;
+      for (let i = 0; i < kids.length; i++) {
+        if (kids[i].nodeType === 3) raw += kids[i].nodeValue;
+      }
+      raw = raw.replace(/\s+/g, " ").trim();
+      if (!raw || raw.length > 48) continue;
+      if (/waiting for (the )?result/i.test(raw)) return true;
+      if (/expires in|closes in|time left/i.test(raw)) return true;
+    }
     return false;
   }
 
@@ -691,7 +768,8 @@
       state.lastReason = "ব্রাউজ: " + p.label + " খুলছি"; log("পেয়ার খুলছি: " + p.label);
       saveState(state); render();
 
-      await openAsset(p.label);
+      const opened = await openAsset(p.label);
+      log(opened ? ("পেয়ার খুলেছে: " + p.label) : ("পেয়ার খোলেনি: " + p.label));
       const tf = clickableByText("1m");
       if (tf && typeof tf.click === "function") tf.click();
       await sleep(1800 + Math.floor(Math.random() * 1200));
@@ -891,7 +969,7 @@
     else render();
   }, 2500);
 
-  log(scrape ? "HUD চালু v0.3.4" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.3.5" : "HUD চালু, scrape নেই");
   render();
   } catch (err) {
     try {
