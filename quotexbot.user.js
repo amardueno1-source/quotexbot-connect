@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.2.0
+// @version      0.2.1
 // @description  DEMO OTC HUD that stays on the trade page. Auto Up/Down without the popup. No cookies, no SSID, no passwords.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -361,13 +361,37 @@
     return false;
   }
 
+  function collectVisibleText(doc, depth) {
+    depth = depth || 0;
+    if (!doc || depth > 4) return "";
+    let text = "";
+    try {
+      const hud = doc.getElementById && doc.getElementById("quotexbot-hud");
+      if (hud) hud.setAttribute("data-qx-skip", "1");
+      const body = doc.body;
+      if (body) text += " " + (body.innerText || body.textContent || "");
+      const all = body ? body.querySelectorAll("*") : [];
+      for (const el of all) {
+        if (el.id === "quotexbot-hud" || (el.closest && el.closest("#quotexbot-hud"))) continue;
+        if (el.shadowRoot) text += " " + (el.shadowRoot.textContent || "");
+      }
+      const frames = doc.querySelectorAll ? doc.querySelectorAll("iframe") : [];
+      for (const f of frames) {
+        try {
+          const idoc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (idoc) text += " " + collectVisibleText(idoc, depth + 1);
+        } catch (_e) {}
+      }
+    } catch (_e2) {}
+    return text;
+  }
+
   function scrapeDocument(doc) {
     const href =
       (doc.defaultView && doc.defaultView.location && doc.defaultView.location.href) ||
       (typeof location !== "undefined" ? location.href : "");
-    const text =
+    const text = collectVisibleText(doc) ||
       (doc.body && (doc.body.innerText || doc.body.textContent)) ||
-      (typeof document !== "undefined" && document.body && document.body.innerText) ||
       "";
     const snap = snapshotFromVisibleText(text, href);
     const btns = findTradeButtons(doc);
