@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.6.0
+// @version      0.6.1
 // @description  DEMO HUD + dashboard: all pair history, signals and trades stored on-page. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -375,11 +375,15 @@
     let text = "";
     try {
       const hud = doc.getElementById && doc.getElementById("quotexbot-hud");
+      const dashEl = doc.getElementById && doc.getElementById("quotexbot-dash");
       const prevDisp = hud && hud.style ? hud.style.display : "";
+      const prevDash = dashEl && dashEl.style ? dashEl.style.display : "";
       if (hud) hud.style.display = "none";
+      if (dashEl) dashEl.style.display = "none";
       const body = doc.body;
       if (body) text += " " + (body.innerText || body.textContent || "");
       if (hud) hud.style.display = prevDisp || "";
+      if (dashEl) dashEl.style.display = prevDash || "";
       const all = body ? body.querySelectorAll("*") : [];
       for (const el of all) {
         if (el.id === "quotexbot-hud" || (el.closest && el.closest("#quotexbot-hud"))) continue;
@@ -498,7 +502,7 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.6.0";
+  const VER = "0.6.1";
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false, dashOpen: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
@@ -512,6 +516,8 @@
     state.logs = [];
     state.lastReason = "";
     state.lastPair = "—";
+    state.otcBars = {};
+    state.pairStats = {};
     try { saveState(state); } catch (_e) {}
   }
 
@@ -551,8 +557,16 @@
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
   function priceRange(pairLabel) {
-    if (/JPY/i.test(pairLabel || "")) return { lo: 20, hi: 400 };
-    if (/XAU|GOLD|GOLD/i.test(pairLabel || "")) return { lo: 800, hi: 5000 };
+    const p = pairLabel || "";
+    if (p === "USD/JPY") return { lo: 90, hi: 200 };
+    if (p === "EUR/JPY") return { lo: 140, hi: 220 };
+    if (p === "GBP/JPY") return { lo: 160, hi: 250 };
+    if (p === "EUR/USD") return { lo: 0.9, hi: 1.35 };
+    if (p === "GBP/USD") return { lo: 1.15, hi: 1.55 };
+    if (p === "AUD/USD") return { lo: 0.5, hi: 0.85 };
+    if (p === "AUD/NZD") return { lo: 0.9, hi: 1.25 };
+    if (p === "USD/CAD") return { lo: 1.2, hi: 1.55 };
+    if (/JPY/i.test(p)) return { lo: 90, hi: 250 };
     return { lo: 0.05, hi: 20 };
   }
 
@@ -627,6 +641,10 @@
   async function sampleOtc(label) {
     const ticks = [];
     for (let i = 0; i < 16; i++) {
+      if (visiblePair() !== label) {
+        await sleep(250);
+        continue;
+      }
       const px = readLivePrice(label);
       if (px != null) ticks.push(px);
       await sleep(250);
@@ -667,15 +685,40 @@
   }
 
   function visiblePair() {
-    const snap = snapDoc();
-    const raw = (snap.asset || "").toUpperCase().replace(/\s+/g, "");
-    for (let i = 0; i < WATCH.length; i++) {
-      const lab = WATCH[i].label;
-      const compact = lab.replace("/", "");
-      if (raw.indexOf(compact) !== -1) return lab;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong");
+    let best = null, bestScore = -1e9;
+    for (let n = 0; n < nodes.length; n++) {
+      const el = nodes[n];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { continue; }
+      if (!t || t.length > 22) continue;
+      for (let i = 0; i < WATCH.length; i++) {
+        const lab = WATCH[i].label;
+        const compact = lab.replace("/", "");
+        const norm = t.toUpperCase().replace(/\s+/g, "").replace("/", "");
+        if (norm.indexOf(compact) === -1 && t.toUpperCase().indexOf(lab) === -1) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+        if (!r || r.width < 8 || r.height < 8) continue;
+        let font = 12;
+        try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
+        const score = font * 8 - r.top + (t.length < 14 ? 40 : 0) + ( /OTC/i.test(t) ? 30 : 0 );
+        if (score > bestScore) { bestScore = score; best = lab; }
+      }
     }
-    if (state.lastPair && state.lastPair !== "—") return state.lastPair;
-    return null;
+    return best;
+  }
+
+  async function waitForPair(label) {
+    for (let i = 0; i < 16; i++) {
+      if (visiblePair() === label) return true;
+      await sleep(220);
+    }
+    return visiblePair() === label;
   }
 
   let saveN = 0;
@@ -930,7 +973,15 @@
       saveState(state); render();
 
       const opened = await openAsset(p.label);
-      log(opened ? ("পেয়ার খুলেছে: " + p.label) : ("পেয়ার খোলেনি: " + p.label));
+      const onChart = await waitForPair(p.label);
+      log((opened && onChart) ? ("চার্ট খুলেছে: " + p.label) : ("চার্ট বদলায়নি, এখন " + (visiblePair() || "—") + " · চাই " + p.label));
+      if (!onChart) {
+        notePair(p.label, { signal: "SKIP", reason: "চার্ট বদলায়নি", px: "—", bars: barCount(p.label) });
+        state.lastSignal = "SKIP";
+        state.lastReason = "চার্ট বদলায়নি: " + p.label;
+        saveState(state); render(); renderDash();
+        return;
+      }
       const tf = clickableByText("1m");
       if (tf && typeof tf.click === "function") tf.click();
       log("OTC চার্টের দাম পড়ছি: " + p.label);
@@ -1113,7 +1164,7 @@
       const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
     }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.6.0</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.6.1</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
   }
 
   function render() {
@@ -1121,7 +1172,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.6.0</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.6.1</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -1129,7 +1180,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.6.0</h1>
+        <h1>quotexbot v0.6.1</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -1234,7 +1285,7 @@
 
   setInterval(recordVisible, 1000);
 
-  log(scrape ? "HUD চালু v0.6.0" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.6.1" : "HUD চালু, scrape নেই");
   render();
   renderDash();
   if (state.auto) scanWatchlist();
