@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.5
+// @version      0.3.6
 // @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -500,12 +500,20 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
+  const VER = "0.3.6";
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
-    logs: [],
+    logs: [], ver: "",
   }, loadState());
   if (!Array.isArray(state.logs)) state.logs = [];
+  if (state.ver !== VER) {
+    state.ver = VER;
+    state.logs = [];
+    state.lastReason = "";
+    state.lastPair = "—";
+    try { saveState(state); } catch (_e) {}
+  }
 
   function log(msg) {
     const now = new Date();
@@ -709,22 +717,7 @@
   }
 
   function tradeOpen() {
-    if (lastClickAt && Date.now() - lastClickAt < 65000) return true;
-    const hud = document.getElementById("quotexbot-hud");
-    const els = document.querySelectorAll("div, span, p, strong, b");
-    for (const el of els) {
-      if (hud && (el === hud || hud.contains(el))) continue;
-      let raw = "";
-      const kids = el.childNodes;
-      for (let i = 0; i < kids.length; i++) {
-        if (kids[i].nodeType === 3) raw += kids[i].nodeValue;
-      }
-      raw = raw.replace(/\s+/g, " ").trim();
-      if (!raw || raw.length > 48) continue;
-      if (/waiting for (the )?result/i.test(raw)) return true;
-      if (/expires in|closes in|time left/i.test(raw)) return true;
-    }
-    return false;
+    return Boolean(lastClickAt && Date.now() - lastClickAt < 65000);
   }
 
   function snapDoc() {
@@ -865,7 +858,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.3.6</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -873,7 +866,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot</h1>
+        <h1>quotexbot v0.3.6</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -969,8 +962,9 @@
     else render();
   }, 2500);
 
-  log(scrape ? "HUD চালু v0.3.5" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.3.6" : "HUD চালু, scrape নেই");
   render();
+  if (state.auto) scanWatchlist();
   } catch (err) {
     try {
       const b = document.createElement("div");
