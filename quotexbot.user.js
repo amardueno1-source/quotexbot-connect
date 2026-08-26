@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.0
-// @description  DEMO HUD: scans several FX pairs, switches the open OTC asset, then Up/Down. No cookies/SSID.
+// @version      0.3.1
+// @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -497,6 +497,8 @@
 
   let lastClickAt = 0;
   let scanning = false;
+  let browseIndex = 0;
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
   function ema(values, period) {
     if (values.length < period) return null;
@@ -634,49 +636,66 @@
   }
 
   async function scanWatchlist() {
-    if (scanning) return;
+    if (scanning || !state.auto) return;
     scanning = true;
+    const p = WATCH[browseIndex % WATCH.length];
+    browseIndex += 1;
     try {
-      const hits = [];
-      for (const p of WATCH) {
-        try {
-          const json = await fetchYahoo(p.yahoo);
-          const bars = barsFromYahoo(json);
-          if (bars.length < 25) continue;
-          const bar = bars[bars.length - 1];
-          const closes = bars.map((b) => b.close);
-          const d = decide(bar, closes);
-          if (d.signal === "CALL" || d.signal === "PUT") hits.push({ pair: p, d });
-        } catch (_e) {}
-      }
-      if (!hits.length) {
-        state.lastSignal = "SKIP";
-        state.lastPair = WATCH.length + " pairs";
-        state.lastReason = "স্ক্যান: কোনো সেটআপ নেই";
+      const snap0 = scrape.scrapeDocument(document);
+      if (snap0.accountMode !== "demo") {
+        state.auto = false;
+        state.lastReason = "LIVE, auto off";
         saveState(state); render();
         return;
       }
-      const hit = hits[0];
-      state.lastSignal = hit.d.signal;
-      state.lastPair = hit.pair.label;
-      state.lastReason = hit.pair.label + " · " + hit.d.reason;
+      if (state.autoCount >= MAX_AUTO) {
+        state.auto = false;
+        state.lastReason = "অটো পজ";
+        saveState(state); render();
+        return;
+      }
+      if (tradeOpen()) {
+        state.lastReason = "ট্রেড চলছে, অপেক্ষা";
+        saveState(state); render();
+        return;
+      }
+
+      state.lastPair = p.label;
+      state.lastSignal = "…";
+      state.lastReason = "ব্রাউজ: " + p.label + " খুলছি";
       saveState(state); render();
 
-      if (!state.auto) return;
-      const snap = scrape.scrapeDocument(document);
-      if (snap.accountMode !== "demo") { state.auto = false; state.lastReason = "LIVE, auto off"; saveState(state); render(); return; }
-      if (state.autoCount >= MAX_AUTO) { state.auto = false; state.lastReason = "অটো পজ"; saveState(state); render(); return; }
-      if (tradeOpen()) return;
+      await openAsset(p.label);
+      const tf = clickableByText("1m");
+      if (tf && typeof tf.click === "function") tf.click();
+      await sleep(1800 + Math.floor(Math.random() * 1200));
+
+      let d = { signal: "SKIP", reason: "ডেটা পাইনি" };
+      try {
+        const json = await fetchYahoo(p.yahoo);
+        const bars = barsFromYahoo(json);
+        if (bars.length >= 25) {
+          d = decide(bars[bars.length - 1], bars.map((b) => b.close));
+        } else {
+          d = { signal: "SKIP", reason: "history কম" };
+        }
+      } catch (_e) {}
+
+      state.lastSignal = d.signal;
+      state.lastReason = p.label + " · " + d.reason;
+      saveState(state); render();
+
+      if (d.signal !== "CALL" && d.signal !== "PUT") return;
       if (Date.now() - lastClickAt < 50000) return;
 
-      await openAsset(hit.pair.label);
-      const r = clickDir(hit.d.signal === "PUT" ? "down" : "up");
+      await sleep(400 + Math.floor(Math.random() * 600));
+      const r = clickDir(d.signal === "PUT" ? "down" : "up");
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();
-        state.lastReason = hit.d.signal + " " + hit.pair.label + " · " + hit.d.reason;
+        state.lastReason = d.signal + " " + p.label + " · " + d.reason;
       } else {
-        state.lastReason = hit.pair.label + " সিগন্যাল, ক্লিক হয়নি: " + (r.error || "") + " — পেয়ারটা খুলে উপরে/নিচে চাপো";
+        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি — পেয়ার খুলে উপরে/নিচে চাপো";
       }
       saveState(state); render();
     } finally {
@@ -731,7 +750,7 @@
       </div>
       <div class="body">
         <div class="row"><span>মোড</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
-        <div class="row"><span>স্ক্যান</span><b>${WATCH.length} pairs</b></div>
+        <div class="row"><span>ব্রাউজ</span><b>${WATCH.length} pairs</b></div>
         <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
@@ -740,7 +759,7 @@
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
-        <p class="note">${state.lastReason || "৮টা পেয়ার স্ক্যান। Yahoo সিগন্যাল, Quotex DEMO তে ক্লিক। পাবলিক কোট ≠ OTC।"}</p>
+        <p class="note">${state.lastReason || "পেয়ার ঘুরে দেখে, চার্ট খুলে, সেটআপ থাকলে DEMO তে ক্লিক। পাবলিক কোট ≠ OTC।"}</p>
       </div>`;
   }
 
@@ -766,7 +785,7 @@
       else {
         state.auto = true;
         state.autoCount = 0;
-        state.lastReason = "অটো চালু · ৮ পেয়ার স্ক্যান";
+        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
         scanWatchlist();
       }
       saveState(state); render();
@@ -788,8 +807,8 @@
 
   setInterval(function () {
     if (state.auto) scanWatchlist();
-    render();
-  }, 20000);
+    else render();
+  }, 8000);
 
   render();
 })();
