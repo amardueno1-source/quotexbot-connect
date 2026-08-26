@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.2.1
-// @description  DEMO OTC HUD that stays on the trade page. Auto Up/Down without the popup. No cookies, no SSID, no passwords.
+// @version      0.3.0
+// @description  DEMO HUD: scans several FX pairs, switches the open OTC asset, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -19,6 +19,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      query1.finance.yahoo.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @run-at       document-idle
@@ -451,6 +453,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this);
 
 
+
 (function () {
   "use strict";
   if (window.__quotexbotHud) return;
@@ -460,6 +463,18 @@
   if (!scrape) return;
 
   const KEY = "quotexbot_tm_state";
+  const MAX_AUTO = 10;
+  const WATCH = [
+    { yahoo: "EURUSD=X", label: "EUR/USD" },
+    { yahoo: "GBPUSD=X", label: "GBP/USD" },
+    { yahoo: "USDJPY=X", label: "USD/JPY" },
+    { yahoo: "AUDUSD=X", label: "AUD/USD" },
+    { yahoo: "AUDNZD=X", label: "AUD/NZD" },
+    { yahoo: "USDCAD=X", label: "USD/CAD" },
+    { yahoo: "EURJPY=X", label: "EUR/JPY" },
+    { yahoo: "GBPJPY=X", label: "GBP/JPY" },
+  ];
+
   function loadState() {
     try {
       if (typeof GM_getValue === "function") {
@@ -467,40 +482,21 @@
         return raw ? JSON.parse(raw) : {};
       }
     } catch (_e) {}
-    try {
-      return JSON.parse(localStorage.getItem(KEY) || "{}");
-    } catch (_e2) {
-      return {};
-    }
+    try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_e2) { return {}; }
   }
-  function saveState(s) {
-    const json = JSON.stringify(s);
-    try {
-      if (typeof GM_setValue === "function") GM_setValue(KEY, json);
-    } catch (_e) {}
-    try {
-      localStorage.setItem(KEY, json);
-    } catch (_e2) {}
+  function saveState(st) {
+    const json = JSON.stringify(st);
+    try { if (typeof GM_setValue === "function") GM_setValue(KEY, json); } catch (_e) {}
+    try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  let state = Object.assign(
-    {
-      connected: true,
-      auto: false,
-      minimized: false,
-      liveAck: false,
-      autoCount: 0,
-      lastSignal: "—",
-      lastReason: "",
-      lastBar: "",
-    },
-    loadState()
-  );
+  let state = Object.assign({
+    connected: true, auto: false, minimized: false, liveAck: false,
+    autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
+  }, loadState());
 
-  const candles = [];
-  let samples = [];
   let lastClickAt = 0;
-  const MAX_AUTO = 10;
+  let scanning = false;
 
   function ema(values, period) {
     if (values.length < period) return null;
@@ -523,29 +519,14 @@
       loss = (loss * (period - 1) + Math.max(-d, 0)) / period;
     }
     if (loss === 0) return 100;
-    const rs = gain / loss;
-    return 100 - 100 / (1 + rs);
-  }
-
-  function readPrice() {
-    const text = (document.body && document.body.innerText) || "";
-    const nums = [];
-    const re = /\b(\d+\.\d{4,6})\b/g;
-    let m;
-    while ((m = re.exec(text))) nums.push(parseFloat(m[1]));
-    if (!nums.length) return null;
-    const snap = scrape.scrapeDocument(document);
-    // Prefer a number close to typical FX OTC quotes, last occurrence often the live line.
-    return nums[nums.length - 1];
+    return 100 - 100 / (1 + gain / loss);
   }
 
   function decide(bar, closes) {
     const fast = ema(closes, 8);
     const slow = ema(closes, 21);
     const r = rsi(closes, 14);
-    if (fast == null || slow == null || r == null) {
-      return { signal: "SKIP", reason: "history কম" };
-    }
+    if (fast == null || slow == null || r == null) return { signal: "SKIP", reason: "history কম" };
     const range = bar.high - bar.low;
     if (range <= 0) return { signal: "SKIP", reason: "flat candle" };
     const body = Math.abs(bar.close - bar.open);
@@ -553,7 +534,7 @@
     const upWick = (bar.high - Math.max(bar.open, bar.close)) / range;
     const dnWick = (Math.min(bar.open, bar.close) - bar.low) / range;
     const sep = Math.abs(fast - slow) / bar.close;
-    if (sep < 0.00003) return { signal: "SKIP", reason: "EMA কাছাকাছি / no trend" };
+    if (sep < 0.00003) return { signal: "SKIP", reason: "EMA কাছাকাছি" };
     const bull = bar.close > bar.open;
     const bear = bar.close < bar.open;
     if (fast > slow && bull) {
@@ -571,6 +552,74 @@
     return { signal: "SKIP", reason: "no aligned setup" };
   }
 
+  function barsFromYahoo(json) {
+    const r = json && json.chart && json.chart.result && json.chart.result[0];
+    if (!r) return [];
+    const q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {};
+    const ts = r.timestamp || [];
+    const out = [];
+    for (let i = 0; i < ts.length; i++) {
+      const o = q.open && q.open[i], h = q.high && q.high[i], l = q.low && q.low[i], c = q.close && q.close[i];
+      if ([o, h, l, c].some((x) => x == null || Number.isNaN(x))) continue;
+      out.push({ t: ts[i], open: o, high: h, low: l, close: c });
+    }
+    return out;
+  }
+
+  function fetchYahoo(symbol) {
+    const url = "https://query1.finance.yahoo.com/v8/finance/chart/" + encodeURIComponent(symbol) + "?interval=1m&range=1d";
+    return new Promise((resolve, reject) => {
+      const done = (fn, v) => fn(v);
+      if (typeof GM_xmlhttpRequest === "function") {
+        GM_xmlhttpRequest({
+          method: "GET",
+          url,
+          headers: { "User-Agent": "quotexbot/0.3" },
+          onload: (res) => {
+            try { resolve(JSON.parse(res.responseText)); }
+            catch (e) { reject(e); }
+          },
+          onerror: reject,
+        });
+        return;
+      }
+      fetch(url).then((r) => r.json()).then(resolve).catch(reject);
+    });
+  }
+
+  function clickableByText(needle) {
+    const want = needle.toLowerCase().replace(/\s+/g, "");
+    const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div, li"));
+    let best = null, bestLen = 1e9;
+    for (const el of nodes) {
+      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 40) continue;
+      const n = t.toLowerCase().replace(/\s+/g, "");
+      if (n.includes(want) || n.includes(want.replace("/", ""))) {
+        if (t.length < bestLen) { best = el; bestLen = t.length; }
+      }
+    }
+    return best;
+  }
+
+  async function openAsset(label) {
+    const already = scrape.scrapeDocument(document);
+    if ((already.asset || "").replace(/\s+/g, "").toUpperCase().includes(label.replace("/", ""))) {
+      return true;
+    }
+    const chip = clickableByText(label) || clickableByText(label + " (OTC)");
+    if (chip && typeof chip.click === "function") {
+      chip.click();
+      await new Promise((r) => setTimeout(r, 400));
+      const item = clickableByText(label);
+      if (item && item !== chip && typeof item.click === "function") item.click();
+      await new Promise((r) => setTimeout(r, 700));
+      return true;
+    }
+    return false;
+  }
+
   function tradeOpen() {
     const t = (document.body && document.body.innerText) || "";
     if (/you don'?t have a trade history/i.test(t)) return false;
@@ -580,10 +629,59 @@
 
   function clickDir(dir) {
     const snap = scrape.scrapeDocument(document);
-    if (snap.accountMode !== "demo" && !state.liveAck) {
-      return { ok: false, error: "live locked" };
-    }
+    if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     return dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
+  }
+
+  async function scanWatchlist() {
+    if (scanning) return;
+    scanning = true;
+    try {
+      const hits = [];
+      for (const p of WATCH) {
+        try {
+          const json = await fetchYahoo(p.yahoo);
+          const bars = barsFromYahoo(json);
+          if (bars.length < 25) continue;
+          const bar = bars[bars.length - 1];
+          const closes = bars.map((b) => b.close);
+          const d = decide(bar, closes);
+          if (d.signal === "CALL" || d.signal === "PUT") hits.push({ pair: p, d });
+        } catch (_e) {}
+      }
+      if (!hits.length) {
+        state.lastSignal = "SKIP";
+        state.lastPair = WATCH.length + " pairs";
+        state.lastReason = "স্ক্যান: কোনো সেটআপ নেই";
+        saveState(state); render();
+        return;
+      }
+      const hit = hits[0];
+      state.lastSignal = hit.d.signal;
+      state.lastPair = hit.pair.label;
+      state.lastReason = hit.pair.label + " · " + hit.d.reason;
+      saveState(state); render();
+
+      if (!state.auto) return;
+      const snap = scrape.scrapeDocument(document);
+      if (snap.accountMode !== "demo") { state.auto = false; state.lastReason = "LIVE, auto off"; saveState(state); render(); return; }
+      if (state.autoCount >= MAX_AUTO) { state.auto = false; state.lastReason = "অটো পজ"; saveState(state); render(); return; }
+      if (tradeOpen()) return;
+      if (Date.now() - lastClickAt < 50000) return;
+
+      await openAsset(hit.pair.label);
+      const r = clickDir(hit.d.signal === "PUT" ? "down" : "up");
+      if (r.ok) {
+        state.autoCount += 1;
+        lastClickAt = Date.now();
+        state.lastReason = hit.d.signal + " " + hit.pair.label + " · " + hit.d.reason;
+      } else {
+        state.lastReason = hit.pair.label + " সিগন্যাল, ক্লিক হয়নি: " + (r.error || "") + " — পেয়ারটা খুলে উপরে/নিচে চাপো";
+      }
+      saveState(state); render();
+    } finally {
+      scanning = false;
+    }
   }
 
   GM_addStyle(`
@@ -598,15 +696,15 @@
     #quotexbot-hud .pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#2a3344}
     #quotexbot-hud .pill.ok{background:#14532d;color:#86efac}
     #quotexbot-hud .body{padding:10px 12px}
-    #quotexbot-hud .row{display:flex;justify-content:space-between;margin:4px 0;color:#9aa6b8}
-    #quotexbot-hud .row b{color:#e8eef7;font-weight:600}
+    #quotexbot-hud .row{display:flex;justify-content:space-between;margin:4px 0;color:#9aa6b8;gap:8px}
+    #quotexbot-hud .row b{color:#e8eef7;font-weight:600;text-align:right}
     #quotexbot-hud .btns{display:flex;gap:8px;margin-top:8px}
     #quotexbot-hud button{flex:1;border:0;border-radius:8px;padding:8px;color:#fff;cursor:pointer;font-weight:700}
     #quotexbot-hud .up{background:#1fa971}
     #quotexbot-hud .down{background:#d64545}
     #quotexbot-hud .auto{width:100%;margin-top:8px;background:#3d9cf0}
     #quotexbot-hud .auto.on{background:#14532d}
-    #quotexbot-hud .x,#quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
+    #quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
     #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px}
   `);
 
@@ -633,9 +731,8 @@
       </div>
       <div class="body">
         <div class="row"><span>মোড</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
-        <div class="row"><span>ব্যালেন্স</span><b>${snap.balance || "—"}</b></div>
-        <div class="row"><span>অ্যাসেট</span><b>${snap.asset || "—"}</b></div>
-        <div class="row"><span>পেআউট</span><b>${[snap.payoutPercent, snap.payoutAmount].filter(Boolean).join(" · ") || "—"}</b></div>
+        <div class="row"><span>স্ক্যান</span><b>${WATCH.length} pairs</b></div>
+        <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="btns">
@@ -643,7 +740,7 @@
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
-        <p class="note">${state.lastReason || "পপআপ বন্ধ হলেও এই প্যানেল থাকবে। শুধু DEMO অটো। এটা আর্থিক পরামর্শ নয়।"}</p>
+        <p class="note">${state.lastReason || "৮টা পেয়ার স্ক্যান। Yahoo সিগন্যাল, Quotex DEMO তে ক্লিক। পাবলিক কোট ≠ OTC।"}</p>
       </div>`;
   }
 
@@ -664,20 +761,18 @@
     }
     if (act === "auto") {
       const snap = scrape.scrapeDocument(document);
-      if (state.auto) {
-        state.auto = false;
-      } else if (snap.accountMode !== "demo") {
-        state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
-      } else {
+      if (state.auto) state.auto = false;
+      else if (snap.accountMode !== "demo") state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
+      else {
         state.auto = true;
         state.autoCount = 0;
-        state.lastReason = "অটো চালু · DEMO";
+        state.lastReason = "অটো চালু · ৮ পেয়ার স্ক্যান";
+        scanWatchlist();
       }
       saveState(state); render();
     }
   });
 
-  // drag
   let drag = null;
   root.addEventListener("mousedown", (ev) => {
     if (!ev.target.closest(".hd")) return;
@@ -691,66 +786,10 @@
     root.style.right = "auto";
   });
 
-  function onMinuteClose(bar) {
-    candles.push(bar);
-    if (candles.length > 120) candles.shift();
-    const closes = candles.map((c) => c.close);
-    const d = decide(bar, closes);
-    state.lastSignal = d.signal;
-    state.lastReason = d.reason;
-    state.lastBar = bar.t;
-    if (!state.auto) { saveState(state); render(); return; }
-    const snap = scrape.scrapeDocument(document);
-    if (snap.accountMode !== "demo") {
-      state.auto = false;
-      state.lastReason = "LIVE detected, auto off";
-      saveState(state); render();
-      return;
-    }
-    if (state.autoCount >= MAX_AUTO) {
-      state.auto = false;
-      state.lastReason = "অটো পজ: " + MAX_AUTO + " ট্রেড";
-      saveState(state); render();
-      return;
-    }
-    if (tradeOpen()) { saveState(state); render(); return; }
-    if (Date.now() - lastClickAt < 50000) { saveState(state); render(); return; }
-    if (d.signal === "CALL" || d.signal === "PUT") {
-      const r = clickDir(d.signal === "PUT" ? "down" : "up");
-      if (r.ok) {
-        state.autoCount += 1;
-        lastClickAt = Date.now();
-        state.lastReason = d.signal + " auto · " + d.reason;
-      } else {
-        state.lastReason = "click fail: " + (r.error || "");
-      }
-    }
-    saveState(state);
-    render();
-  }
-
   setInterval(function () {
-    const px = readPrice();
-    const now = new Date();
-    const bucket = new Date(now);
-    bucket.setSeconds(0, 0);
-    const t = bucket.toISOString();
-    if (px != null) samples.push({ t: now.getTime(), px });
-    if (samples.length > 400) samples = samples.slice(-400);
-    if (state.lastBar !== t && now.getSeconds() >= 1 && samples.length) {
-      const prev = new Date(bucket.getTime() - 60000).toISOString();
-      // close previous minute if we haven't
-      const inPrev = samples.filter((s) => s.t >= bucket.getTime() - 60000 && s.t < bucket.getTime());
-      if (inPrev.length && state.lastBar !== prev) {
-        const opens = inPrev[0].px;
-        const close = inPrev[inPrev.length - 1].px;
-        const high = Math.max.apply(null, inPrev.map((s) => s.px));
-        const low = Math.min.apply(null, inPrev.map((s) => s.px));
-        onMinuteClose({ t: prev, open: opens, high, low, close });
-      }
-    }
-    if (!root.dataset.drawn) { render(); root.dataset.drawn = "1"; }
-  }, 2000);
+    if (state.auto) scanWatchlist();
+    render();
+  }, 20000);
 
   render();
 })();
