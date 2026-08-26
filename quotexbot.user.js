@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.1
+// @version      0.8.2
 // @description  DEMO HUD: one CONFIG, live quote observer, no pair switch. Edit CONFIG only. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -478,7 +478,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.1",
+    version: "0.8.2",
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
     autoReloadOnUpdate: true,
@@ -716,10 +716,21 @@
     return ((state.otcBars && state.otcBars[label]) || []).length;
   }
 
+  function labelFromText(raw) {
+    if (!raw) return null;
+    const u = String(raw).toUpperCase().replace(/\s+/g, "").replace("OTC", "");
+    for (let i = 0; i < WATCH.length; i++) {
+      const lab = WATCH[i].label;
+      if (u.indexOf(lab.replace("/", "")) !== -1 || u.indexOf(lab) !== -1) return lab;
+    }
+    const m = String(raw).match(/\b([A-Za-z]{3})\s*\/\s*([A-Za-z]{3})\b/);
+    return m ? (m[1].toUpperCase() + "/" + m[2].toUpperCase()) : null;
+  }
+
   function visiblePair() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
-    const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong");
+    const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p");
     let best = null, bestScore = -1e9;
     for (let n = 0; n < nodes.length; n++) {
       const el = nodes[n];
@@ -727,22 +738,23 @@
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { continue; }
-      if (!t || t.length > 22) continue;
-      for (let i = 0; i < WATCH.length; i++) {
-        const lab = WATCH[i].label;
-        const compact = lab.replace("/", "");
-        const norm = t.toUpperCase().replace(/\s+/g, "").replace("/", "");
-        if (norm.indexOf(compact) === -1 && t.toUpperCase().indexOf(lab) === -1) continue;
-        let r;
-        try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
-        if (!r || r.width < 8 || r.height < 8) continue;
-        let font = 12;
-        try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
-        const score = font * 8 - r.top + (t.length < 14 ? 40 : 0) + ( /OTC/i.test(t) ? 30 : 0 );
-        if (score > bestScore) { bestScore = score; best = lab; }
-      }
+      if (!t || t.length > 48) continue;
+      const lab = labelFromText(t);
+      if (!lab) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+      if (!r || r.width < 4 || r.height < 4) continue;
+      let font = 12;
+      try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
+      const score = font * 8 - r.top + (t.length < 18 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0);
+      if (score > bestScore) { bestScore = score; best = lab; }
     }
-    return best;
+    if (best) return best;
+    const snap = snapDoc();
+    const fromSnap = labelFromText(snap && snap.asset);
+    if (fromSnap) return fromSnap;
+    if (state.lastPair && state.lastPair !== "—") return state.lastPair;
+    return null;
   }
 
   async function waitForPair(label) {
