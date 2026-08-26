@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.6
-// @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
+// @version      0.4.0
+// @description  DEMO HUD: reads live OTC price from the visible chart, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -26,8 +26,6 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
-// @grant        GM_xmlhttpRequest
-// @connect      query1.finance.yahoo.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @all_frames   true
@@ -500,7 +498,7 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.3.6";
+  const VER = "0.4.0";
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
@@ -530,6 +528,80 @@
   let scanning = false;
   let browseIndex = 0;
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  function readLivePrice(pairLabel) {
+    const hud = document.getElementById("quotexbot-hud");
+    const jpy = /JPY/i.test(pairLabel || "");
+    const nodes = document.querySelectorAll("span, div, b, strong, p, label");
+    const cands = [];
+    for (const el of nodes) {
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (el.children && el.children.length > 3) continue;
+      let t = (el.innerText || "").replace(/\s+/g, "").replace(/,/g, "");
+      if (!/^\d+\.\d{2,6}$/.test(t)) continue;
+      const v = parseFloat(t);
+      if (!isFinite(v) || v <= 0) continue;
+      if (jpy) { if (v < 20 || v > 400) continue; }
+      else { if (v < 0.05 || v > 20) continue; }
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e) { continue; }
+      if (!r || r.width < 8 || r.height < 8) continue;
+      let font = 12;
+      try { font = parseFloat((window.getComputedStyle(el).fontSize || "12")); } catch (_e2) {}
+      cands.push({ v: v, font: font, area: r.width * r.height, y: r.top });
+    }
+    if (!cands.length) return null;
+    cands.sort(function (a, b) { return (b.font - a.font) || (b.area - a.area); });
+    return cands[0].v;
+  }
+
+  async function sampleOtc(label) {
+    const ticks = [];
+    for (let i = 0; i < 8; i++) {
+      const px = readLivePrice(label);
+      if (px != null) ticks.push(px);
+      await sleep(350);
+    }
+    return ticks;
+  }
+
+  function ingestTicks(label, ticks) {
+    if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
+    if (!Array.isArray(state.otcBars[label])) state.otcBars[label] = [];
+    const bars = state.otcBars[label];
+    const minute = Math.floor(Date.now() / 60000);
+    for (let i = 0; i < ticks.length; i++) {
+      const px = ticks[i];
+      let bar = bars.length && bars[bars.length - 1].m === minute ? bars[bars.length - 1] : null;
+      if (!bar) {
+        bar = { m: minute, t: minute * 60, open: px, high: px, low: px, close: px };
+        bars.push(bar);
+      } else {
+        bar.high = Math.max(bar.high, px);
+        bar.low = Math.min(bar.low, px);
+        bar.close = px;
+      }
+    }
+    if (bars.length > 80) state.otcBars[label] = bars.slice(-80);
+    return state.otcBars[label];
+  }
+
+  function decideTicks(ticks) {
+    if (ticks.length < 6) return { signal: "SKIP", reason: "OTC tick কম" };
+    const first = ticks[0], last = ticks[ticks.length - 1];
+    let high = ticks[0], low = ticks[0];
+    for (let i = 1; i < ticks.length; i++) {
+      if (ticks[i] > high) high = ticks[i];
+      if (ticks[i] < low) low = ticks[i];
+    }
+    const range = high - low;
+    if (range <= 0) return { signal: "SKIP", reason: "OTC flat" };
+    const move = last - first;
+    if (Math.abs(move) / range < 0.45) return { signal: "SKIP", reason: "OTC chop" };
+    if (Math.abs(move) / last < 0.000015) return { signal: "SKIP", reason: "OTC নড়াচড়া কম" };
+    if (move > 0) return { signal: "CALL", reason: "OTC live up " + last };
+    return { signal: "PUT", reason: "OTC live down " + last };
+  }
 
   function ema(values, period) {
     if (values.length < period) return null;
@@ -765,18 +837,24 @@
       log(opened ? ("পেয়ার খুলেছে: " + p.label) : ("পেয়ার খোলেনি: " + p.label));
       const tf = clickableByText("1m");
       if (tf && typeof tf.click === "function") tf.click();
-      await sleep(1800 + Math.floor(Math.random() * 1200));
+      log("OTC চার্টের দাম পড়ছি: " + p.label);
+      const ticks = await sampleOtc(p.label);
+      const bars = ingestTicks(p.label, ticks);
+      const lastPx = ticks.length ? ticks[ticks.length - 1] : null;
+      state.lastPx = lastPx != null ? String(lastPx) : "—";
+      log(lastPx != null
+        ? ("OTC দাম " + p.label + " = " + lastPx + " · " + ticks.length + " tick")
+        : ("OTC দাম পাইনি: " + p.label));
 
-      let d = { signal: "SKIP", reason: "ডেটা পাইনি" };
-      try {
-        const json = await fetchYahoo(p.yahoo);
-        const bars = barsFromYahoo(json);
-        if (bars.length >= 25) {
-          d = decide(bars[bars.length - 1], bars.map((b) => b.close));
-        } else {
-          d = { signal: "SKIP", reason: "history কম" };
-        }
-      } catch (_e) {}
+      let d;
+      if (bars.length >= 21) {
+        const raw = decide(bars[bars.length - 1], bars.map((b) => b.close));
+        d = { signal: raw.signal, reason: "OTC 1m · " + raw.reason };
+      } else if (ticks.length >= 6) {
+        d = decideTicks(ticks);
+      } else {
+        d = { signal: "SKIP", reason: "OTC দাম পাইনি" };
+      }
 
       state.lastSignal = d.signal;
       state.lastReason = p.label + " · " + d.reason; log(p.label + " সিগন্যাল " + d.signal + " — " + d.reason);
@@ -858,7 +936,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.3.6</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.4.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -866,7 +944,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.3.6</h1>
+        <h1>quotexbot v0.4.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -874,6 +952,7 @@
         <div class="row"><span>মোড</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
         <div class="row"><span>ব্রাউজ</span><b>${WATCH.length} pairs</b></div>
         <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
+        <div class="row"><span>OTC দাম</span><b>${state.lastPx || "—"}</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="btns">
@@ -881,7 +960,7 @@
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
-        <p class="note">${state.lastReason || "পেয়ার ঘুরে দেখে, চার্ট খুলে, সেটআপ থাকলে DEMO তে ক্লিক।"}</p>
+        <p class="note">${state.lastReason || "Quotex OTC চার্টের লাইভ দাম দেখে সিগন্যাল, সেটআপ থাকলে DEMO তে ক্লিক।"}</p>
         <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -962,7 +1041,7 @@
     else render();
   }, 2500);
 
-  log(scrape ? "HUD চালু v0.3.6" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.4.0" : "HUD চালু, scrape নেই");
   render();
   if (state.auto) scanWatchlist();
   } catch (err) {
