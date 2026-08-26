@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.6.1
-// @description  DEMO HUD + dashboard: all pair history, signals and trades stored on-page. No cookies/SSID.
+// @version      0.7.0
+// @description  DEMO HUD: stays on the open chart, no pair switching. Dashboard stores ticks. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -502,7 +502,7 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.6.1";
+  const VER = "0.7.0";
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false, dashOpen: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
@@ -945,8 +945,6 @@
   async function scanWatchlist() {
     if (scanning || !state.auto) return;
     scanning = true;
-    const p = WATCH[browseIndex % WATCH.length];
-    browseIndex += 1;
     try {
       const snap0 = snapDoc();
       if (snap0.accountMode !== "demo") {
@@ -967,23 +965,21 @@
         return;
       }
 
-      state.lastPair = p.label;
-      state.lastSignal = "…";
-      state.lastReason = "ব্রাউজ: " + p.label + " খুলছি"; log("পেয়ার খুলছি: " + p.label);
-      saveState(state); render();
-
-      const opened = await openAsset(p.label);
-      const onChart = await waitForPair(p.label);
-      log((opened && onChart) ? ("চার্ট খুলেছে: " + p.label) : ("চার্ট বদলায়নি, এখন " + (visiblePair() || "—") + " · চাই " + p.label));
-      if (!onChart) {
-        notePair(p.label, { signal: "SKIP", reason: "চার্ট বদলায়নি", px: "—", bars: barCount(p.label) });
-        state.lastSignal = "SKIP";
-        state.lastReason = "চার্ট বদলায়নি: " + p.label;
-        saveState(state); render(); renderDash();
+      const vis = visiblePair();
+      const p = vis ? { label: vis } : null;
+      if (!p) {
+        log("চার্টে পেয়ার ধরা যায়নি, সুইচ করব না");
+        state.lastReason = "পেয়ার খোলা রাখো, সুইচ অফ";
+        saveState(state); render();
         return;
       }
-      const tf = clickableByText("1m");
-      if (tf && typeof tf.click === "function") tf.click();
+
+      state.lastPair = p.label;
+      state.lastSignal = "…";
+      state.lastReason = "এক চার্ট: " + p.label;
+      log("সুইচ নাই · এই চার্ট: " + p.label);
+      saveState(state); render();
+
       log("OTC চার্টের দাম পড়ছি: " + p.label);
       const ticks = await sampleOtc(p.label);
       const bars = ingestTicks(p.label, ticks);
@@ -1164,7 +1160,7 @@
       const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
     }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.6.1</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.7.0</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
   }
 
   function render() {
@@ -1172,7 +1168,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.6.1</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.7.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -1180,13 +1176,13 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.6.1</h1>
+        <h1>quotexbot v0.7.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
       <div class="body">
         <div class="row"><span>মোড</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
-        <div class="row"><span>ব্রাউজ</span><b>${WATCH.length} pairs</b></div>
+        <div class="row"><span>ব্রাউজ</span><b>সুইচ অফ · এক চার্ট</b></div>
         <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
         <div class="row"><span>OTC দাম</span><b>${state.lastPx || "—"}</b></div>
         <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/21 বার · সেভ</b></div>
@@ -1198,7 +1194,7 @@
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
         <button class="dashbtn" type="button" data-act="dash">ড্যাশবোর্ড</button>
-        <p class="note">${state.lastReason || "প্রতি পেয়ারের OTC দাম সেভ থাকে। ২১ বার জমলে সেই হিস্ট্রি দিয়ে সিগন্যাল।"}</p>
+        <p class="note">${state.lastReason || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"}</p>
         <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -1237,7 +1233,7 @@
         state.auto = true;
         state.autoCount = 0;
         state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
-        log("অটো চালু — পেয়ার ঘুরে দেখবে");
+        log("অটো চালু — এই চার্টেই থাকবে");
         scanWatchlist();
       }
       saveState(state); render();
@@ -1285,7 +1281,7 @@
 
   setInterval(recordVisible, 1000);
 
-  log(scrape ? "HUD চালু v0.6.1" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.7.0" : "HUD চালু, scrape নেই");
   render();
   renderDash();
   if (state.auto) scanWatchlist();
