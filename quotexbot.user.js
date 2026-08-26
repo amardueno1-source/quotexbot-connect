@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.5.1
-// @description  DEMO HUD: each pair keeps saved OTC history and decides from it. No cookies/SSID.
+// @version      0.6.0
+// @description  DEMO HUD + dashboard: all pair history, signals and trades stored on-page. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -498,13 +498,15 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.5.1";
+  const VER = "0.6.0";
   let state = Object.assign({
-    connected: true, auto: false, minimized: false, liveAck: false,
+    connected: true, auto: false, minimized: false, liveAck: false, dashOpen: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
-    logs: [], ver: "",
+    logs: [], ver: "", pairStats: {}, journal: [],
   }, loadState());
   if (!Array.isArray(state.logs)) state.logs = [];
+  if (!state.pairStats || typeof state.pairStats !== "object") state.pairStats = {};
+  if (!Array.isArray(state.journal)) state.journal = [];
   if (state.ver !== VER) {
     state.ver = VER;
     state.logs = [];
@@ -522,6 +524,25 @@
     state.logs.push(line);
     if (state.logs.length > 40) state.logs = state.logs.slice(-40);
     console.log("[quotexbot]", line);
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+
+  function notePair(label, info) {
+    if (!label) return;
+    if (!state.pairStats || typeof state.pairStats !== "object") state.pairStats = {};
+    const cur = state.pairStats[label] || {};
+    state.pairStats[label] = Object.assign({}, cur, info, { at: Date.now() });
+  }
+
+  function addJournal(row) {
+    if (!Array.isArray(state.journal)) state.journal = [];
+    state.journal.push(row);
+    if (state.journal.length > 80) state.journal = state.journal.slice(-80);
   }
 
   let lastClickAt = 0;
@@ -665,25 +686,17 @@
     if (px == null) return;
     ingestTicks(label, [px]);
     state.lastPx = String(px);
+    notePair(label, { px: String(px), bars: barCount(label) });
     saveN += 1;
     if (saveN % 10 === 0) saveState(state);
   }
 
   function decideTicks(ticks) {
-    if (ticks.length < 6) return { signal: "SKIP", reason: "OTC tick কম" };
+    if (ticks.length < 3) return { signal: "SKIP", reason: "OTC tick কম" };
     const first = ticks[0], last = ticks[ticks.length - 1];
-    let high = ticks[0], low = ticks[0];
-    for (let i = 1; i < ticks.length; i++) {
-      if (ticks[i] > high) high = ticks[i];
-      if (ticks[i] < low) low = ticks[i];
-    }
-    const range = high - low;
-    if (range <= 0) return { signal: "SKIP", reason: "OTC flat" };
-    const move = last - first;
-    if (Math.abs(move) / range < 0.45) return { signal: "SKIP", reason: "OTC chop" };
-    if (Math.abs(move) / last < 0.000015) return { signal: "SKIP", reason: "OTC নড়াচড়া কম" };
-    if (move > 0) return { signal: "CALL", reason: "OTC live up " + last };
-    return { signal: "PUT", reason: "OTC live down " + last };
+    if (last > first) return { signal: "CALL", reason: "OTC live up " + first + " → " + last };
+    if (last < first) return { signal: "PUT", reason: "OTC live down " + first + " → " + last };
+    return { signal: "SKIP", reason: "OTC flat " + last };
   }
 
   function ema(values, period) {
@@ -937,30 +950,50 @@
       if (hist.length >= 21) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
         d = { signal: raw.signal, reason: "সেভ হিস্ট্রি " + hist.length + " বার · " + raw.reason };
-      } else if (ticks.length >= 6) {
+      } else if (ticks.length >= 3) {
         const live = decideTicks(ticks);
         d = { signal: live.signal, reason: live.reason + " · জমা " + barCount(p.label) + "/21" };
+      } else if (bars.length >= 2) {
+        const a = bars[bars.length - 2], b = bars[bars.length - 1];
+        if (b.close > a.close) d = { signal: "CALL", reason: "সেভ বার up · জমা " + bars.length };
+        else if (b.close < a.close) d = { signal: "PUT", reason: "সেভ বার down · জমা " + bars.length };
+        else d = { signal: "SKIP", reason: "সেভ বার flat · জমা " + bars.length };
       } else {
         d = { signal: "SKIP", reason: "OTC দাম পাইনি · জমা " + barCount(p.label) + "/21" };
       }
 
       state.lastSignal = d.signal;
-      state.lastReason = p.label + " · " + d.reason; log(p.label + " সিগন্যাল " + d.signal + " — " + d.reason);
-      saveState(state); render();
+      state.lastReason = p.label + " · " + d.reason; log(p.label + " সিগন্যাল " + d.signal + " · " + d.reason);
+      notePair(p.label, {
+        px: lastPx != null ? String(lastPx) : (state.pairStats[p.label] && state.pairStats[p.label].px) || "—",
+        signal: d.signal,
+        reason: d.reason,
+        bars: barCount(p.label),
+        ticks: ticks.length,
+      });
+      saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
       if (Date.now() - lastClickAt < 50000) return;
 
       await sleep(400 + Math.floor(Math.random() * 600));
       const r = clickDir(d.signal === "PUT" ? "down" : "up");
+      addJournal({
+        t: Date.now(),
+        pair: p.label,
+        signal: d.signal,
+        px: lastPx != null ? String(lastPx) : "—",
+        ok: Boolean(r.ok),
+        err: r.ok ? "" : (r.error || "fail"),
+      });
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();
         state.lastReason = d.signal + " " + p.label + " · " + d.reason; log("ক্লিক OK: " + d.signal + " " + p.label);
       } else {
-        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি — পেয়ার খুলে উপরে/নিচে চাপো"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
+        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
       }
-      saveState(state); render();
+      saveState(state); render(); renderDash();
     } finally {
       scanning = false;
     }
@@ -994,6 +1027,24 @@
       border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
     #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
     #quotexbot-hud .log .empty{color:#6b7787}
+    #quotexbot-hud .dashbtn{width:100%;margin-top:6px;background:#2a3344}
+    #quotexbot-dash{position:fixed;top:12px;left:12px;z-index:2147483646 !important;width:540px;
+      max-height:calc(100vh - 24px);overflow:auto;background:#0b0f16;color:#e8eef7;
+      border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;
+      box-shadow:0 8px 28px rgba(0,0,0,.5);display:none !important;pointer-events:auto !important}
+    #quotexbot-dash.open{display:block !important}
+    #quotexbot-dash .hd{display:flex;justify-content:space-between;align-items:center;
+      padding:10px 12px;border-bottom:1px solid #2a3344}
+    #quotexbot-dash h1{margin:0;font-size:14px}
+    #quotexbot-dash .body{padding:10px 12px}
+    #quotexbot-dash h2{margin:12px 0 6px;font-size:12px;color:#9aa6b8;font-weight:600}
+    #quotexbot-dash table{width:100%;border-collapse:collapse;font-size:11px}
+    #quotexbot-dash th,#quotexbot-dash td{padding:5px 6px;border-bottom:1px solid #1c2430;text-align:left}
+    #quotexbot-dash th{color:#9aa6b8}
+    #quotexbot-dash .call{color:#86efac;font-weight:700}
+    #quotexbot-dash .put{color:#fca5a5;font-weight:700}
+    #quotexbot-dash .skip{color:#9aa6b8}
+    #quotexbot-dash .m{background:transparent;color:#9aa6b8;border:0;cursor:pointer;font-size:16px}
   `;
 
   function injectCss() {
@@ -1017,14 +1068,60 @@
     return el;
   }
 
+  function createDash() {
+    injectCss();
+    let el = document.getElementById("quotexbot-dash");
+    if (el && el.isConnected) return el;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    el = document.createElement("div");
+    el.id = "quotexbot-dash";
+    (document.body || document.documentElement).appendChild(el);
+    el.addEventListener("click", function (ev) {
+      const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
+      if (act === "dash-close") {
+        state.dashOpen = false;
+        saveState(state);
+        renderDash();
+      }
+    });
+    return el;
+  }
+
   let root = createRoot();
+  let dash = createDash();
+
+  function renderDash() {
+    dash = createDash();
+    if (!state.dashOpen) {
+      dash.className = "";
+      dash.innerHTML = "";
+      return;
+    }
+    dash.className = "open";
+    const rows = WATCH.map(function (p) {
+      const st = (state.pairStats && state.pairStats[p.label]) || {};
+      const sig = st.signal || "—";
+      const cls = sig === "CALL" ? "call" : sig === "PUT" ? "put" : "skip";
+      const nbar = barCount(p.label);
+      return "<tr><td>" + esc(p.label) + "</td><td>" + esc(st.px || "—") + "</td><td>" + nbar + "/21</td><td class=\"" + cls + "\">" + esc(sig) + "</td><td>" + esc(st.reason || "—") + "</td></tr>";
+    }).join("");
+    const jrows = (state.journal || []).slice(-20).reverse().map(function (j) {
+      const when = new Date(j.t);
+      const hh = String(when.getHours()).padStart(2, "0");
+      const mm = String(when.getMinutes()).padStart(2, "0");
+      const ss = String(when.getSeconds()).padStart(2, "0");
+      const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
+      return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
+    }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.6.0</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+  }
 
   function render() {
     const snap = snapDoc();
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.5.1</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.6.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -1032,7 +1129,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.5.1</h1>
+        <h1>quotexbot v0.6.0</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -1049,6 +1146,7 @@
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
+        <button class="dashbtn" type="button" data-act="dash">ড্যাশবোর্ড</button>
         <p class="note">${state.lastReason || "প্রতি পেয়ারের OTC দাম সেভ থাকে। ২১ বার জমলে সেই হিস্ট্রি দিয়ে সিগন্যাল।"}</p>
         <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
@@ -1057,6 +1155,7 @@
       </div>`;
     const box = root.querySelector(".log");
     if (box) box.scrollTop = box.scrollHeight;
+    renderDash();
   }
 
   function onHudClick(ev) {
@@ -1064,6 +1163,7 @@
     if (!act) return;
     if (act === "mini") { state.minimized = true; saveState(state); render(); }
     if (act === "restore") { state.minimized = false; saveState(state); render(); }
+    if (act === "dash") { state.dashOpen = !state.dashOpen; saveState(state); renderDash(); }
     if (act === "up") {
       const r = clickDir("up");
       state.lastReason = r.ok ? "উপরে clicked" : (r.error || "fail"); log(r.ok ? "ম্যানুয়াল উপরে OK" : "ম্যানুয়াল উপরে FAIL: " + (r.error || ""));
@@ -1116,12 +1216,13 @@
     const live = document.getElementById("quotexbot-hud");
     if (live && live.isConnected) {
       root = live;
-      return;
+    } else {
+      root = createRoot();
+      bindHud(root);
+      log("HUD আবার লাগানো হয়েছে");
+      render();
     }
-    root = createRoot();
-    bindHud(root);
-    log("HUD আবার লাগানো হয়েছে");
-    render();
+    dash = createDash();
   }
 
   setInterval(function () {
@@ -1133,8 +1234,9 @@
 
   setInterval(recordVisible, 1000);
 
-  log(scrape ? "HUD চালু v0.5.1" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.6.0" : "HUD চালু, scrape নেই");
   render();
+  renderDash();
   if (state.auto) scanWatchlist();
   } catch (err) {
     try {
