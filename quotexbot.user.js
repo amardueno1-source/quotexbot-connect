@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.2
-// @description  DEMO HUD: one CONFIG, live quote observer, no pair switch. Edit CONFIG only. No cookies/SSID.
+// @version      0.8.3
+// @description  DEMO HUD: track right-axis live price tag. One CONFIG, no pair switch. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -19,6 +19,8 @@
 // @match        https://quotex.com/*
 // @match        https://*.quotex.com/*
 // @match        https://*.quotex.app/*
+// @match        https://market-qx.io/*
+// @match        https://*.market-qx.io/*
 // @match        https://quotex.app/*
 // @include      *://*/demo-trade*
 // @include      *://*/live-trade*
@@ -478,7 +480,8 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.2",
+    version: "0.8.3",
+    axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
     autoReloadOnUpdate: true,
@@ -500,9 +503,9 @@
     rsiCall: [48, 68],
     rsiPut: [32, 52],
     ranges: {
-      "USD/JPY": [90, 200],
-      "EUR/JPY": [140, 220],
-      "GBP/JPY": [160, 250],
+      "USD/JPY": [90, 220],
+      "EUR/JPY": [120, 240],
+      "GBP/JPY": [130, 260],
       "EUR/USD": [0.9, 1.35],
       "GBP/USD": [1.20, 1.55],
       "AUD/USD": [0.5, 0.85],
@@ -650,16 +653,61 @@
     return found;
   }
 
+  function readAxisLivePrice() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const leftMin = wide * (CONFIG.axisRightFrac || 0.68);
+    const nodes = document.querySelectorAll("span, div, b, strong, label, em");
+    const hits = [];
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/[\s\u00a0]/g, "").replace(/,/g, ""); } catch (_e) { continue; }
+      if (!t || t.length > 16) continue;
+      const m = t.match(/^(\d{1,4}\.\d{2,6})$/);
+      if (!m) continue;
+      const v = parseFloat(m[1]);
+      if (!isFinite(v) || v < 0.4 || v >= 9000) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+      if (!r || r.left < leftMin || r.width < 8 || r.height < 8) continue;
+      if (r.top < 40 || r.top > (window.innerHeight || 800) * 0.9) continue;
+      let font = 12;
+      let bg = "";
+      try {
+        const cs = window.getComputedStyle(el);
+        font = parseFloat(cs.fontSize || "12");
+        bg = cs.backgroundColor || "";
+      } catch (_e3) {}
+      const hasBg = !!(bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)");
+      let nearBell = false;
+      try {
+        const p = el.parentElement;
+        nearBell = !!(p && (p.querySelector("svg") || p.querySelector("button") || el.previousElementSibling));
+      } catch (_e4) {}
+      hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
+    }
+    if (!hits.length) return null;
+    hits.sort(function (a, b) {
+      return (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (b.decimals - a.decimals) || (b.x - a.x) || (b.font - a.font);
+    });
+    return hits[0];
+  }
+
   function readLivePrice(pairLabel) {
+    const axis = readAxisLivePrice();
+    if (axis && axis.v != null) return axis.v;
     const range = priceRange(pairLabel);
     const all = scrapeQuoteCandidates();
     const hit = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; });
-    const pool = hit.length ? hit : [];
-    if (!pool.length) return null;
-    pool.sort(function (a, b) {
+    if (!hit.length) return null;
+    hit.sort(function (a, b) {
       return (b.decimals - a.decimals) || (b.font - a.font) || (b.area - a.area);
     });
-    return pool[0].v;
+    return hit[0].v;
   }
 
   function peekQuotes(pairLabel) {
@@ -1332,6 +1380,23 @@
     }
   }
 
+  let axisObs = null;
+  let lastAxisEl = null;
+  function bindAxisObserver() {
+    const axis = readAxisLivePrice();
+    if (!axis || !axis.el || axis.el === lastAxisEl) return;
+    lastAxisEl = axis.el;
+    try { if (axisObs) axisObs.disconnect(); } catch (_e) {}
+    try {
+      axisObs = new MutationObserver(function () { onQuoteTick(); });
+      axisObs.observe(axis.el.parentElement || axis.el, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+    } catch (_e2) {}
+  }
+
   function startQuoteObserver() {
     if (window.__quotexbotObs) return;
     window.__quotexbotObs = true;
@@ -1343,7 +1408,11 @@
         characterData: true,
       });
     } catch (_e) {}
-    setInterval(onQuoteTick, CONFIG.recordMs);
+    setInterval(function () {
+      bindAxisObserver();
+      onQuoteTick();
+    }, CONFIG.recordMs);
+    bindAxisObserver();
   }
 
   setInterval(function () {
