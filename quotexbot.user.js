@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.1
+// @version      0.3.2
 // @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -493,7 +493,20 @@
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
+    logs: [],
   }, loadState());
+  if (!Array.isArray(state.logs)) state.logs = [];
+
+  function log(msg) {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const ss = String(now.getSeconds()).padStart(2, "0");
+    const line = hh + ":" + mm + ":" + ss + "  " + msg;
+    state.logs.push(line);
+    if (state.logs.length > 40) state.logs = state.logs.slice(-40);
+    console.log("[quotexbot]", line);
+  }
 
   let lastClickAt = 0;
   let scanning = false;
@@ -644,25 +657,25 @@
       const snap0 = scrape.scrapeDocument(document);
       if (snap0.accountMode !== "demo") {
         state.auto = false;
-        state.lastReason = "LIVE, auto off";
+        state.lastReason = "LIVE, auto off"; log("লাইভ অ্যাকাউন্ট দেখে অটো বন্ধ");
         saveState(state); render();
         return;
       }
       if (state.autoCount >= MAX_AUTO) {
         state.auto = false;
-        state.lastReason = "অটো পজ";
+        state.lastReason = "অটো পজ"; log("১০টা ট্রেড হয়েছে, অটো থামল");
         saveState(state); render();
         return;
       }
       if (tradeOpen()) {
-        state.lastReason = "ট্রেড চলছে, অপেক্ষা";
+        state.lastReason = "ট্রেড চলছে, অপেক্ষা"; log("আগের ট্রেড শেষ হয়নি, অপেক্ষা");
         saveState(state); render();
         return;
       }
 
       state.lastPair = p.label;
       state.lastSignal = "…";
-      state.lastReason = "ব্রাউজ: " + p.label + " খুলছি";
+      state.lastReason = "ব্রাউজ: " + p.label + " খুলছি"; log("পেয়ার খুলছি: " + p.label);
       saveState(state); render();
 
       await openAsset(p.label);
@@ -682,7 +695,7 @@
       } catch (_e) {}
 
       state.lastSignal = d.signal;
-      state.lastReason = p.label + " · " + d.reason;
+      state.lastReason = p.label + " · " + d.reason; log(p.label + " সিগন্যাল " + d.signal + " — " + d.reason);
       saveState(state); render();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
@@ -693,9 +706,9 @@
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();
-        state.lastReason = d.signal + " " + p.label + " · " + d.reason;
+        state.lastReason = d.signal + " " + p.label + " · " + d.reason; log("ক্লিক OK: " + d.signal + " " + p.label);
       } else {
-        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি — পেয়ার খুলে উপরে/নিচে চাপো";
+        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি — পেয়ার খুলে উপরে/নিচে চাপো"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
       }
       saveState(state); render();
     } finally {
@@ -704,7 +717,7 @@
   }
 
   GM_addStyle(`
-    #quotexbot-hud{position:fixed;top:72px;right:16px;z-index:2147483646;width:280px;
+    #quotexbot-hud{position:fixed;top:56px;right:16px;z-index:2147483646;width:380px;
       background:#10141c;color:#e8eef7;border:1px solid #2a3344;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
       user-select:none}
@@ -725,6 +738,11 @@
     #quotexbot-hud .auto.on{background:#14532d}
     #quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
     #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px}
+    #quotexbot-hud .logh{margin:10px 0 4px;font-size:11px;color:#9aa6b8;display:flex;justify-content:space-between}
+    #quotexbot-hud .log{height:170px;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
+      border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
+    #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
+    #quotexbot-hud .log .empty{color:#6b7787}
   `);
 
   const root = document.createElement("div");
@@ -759,8 +777,14 @@
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
-        <p class="note">${state.lastReason || "পেয়ার ঘুরে দেখে, চার্ট খুলে, সেটআপ থাকলে DEMO তে ক্লিক। পাবলিক কোট ≠ OTC।"}</p>
+        <p class="note">${state.lastReason || "পেয়ার ঘুরে দেখে, চার্ট খুলে, সেটআপ থাকলে DEMO তে ক্লিক।"}</p>
+        <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
+        <div class="log">${state.logs.length
+          ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
+          : '<div class="empty">এখনো কিছু হয়নি। অটো চালু করলে এখানে দেখাবে।</div>'}</div>
       </div>`;
+    const box = root.querySelector(".log");
+    if (box) box.scrollTop = box.scrollHeight;
   }
 
   root.addEventListener("click", (ev) => {
@@ -770,22 +794,22 @@
     if (act === "restore") { state.minimized = false; saveState(state); render(); }
     if (act === "up") {
       const r = clickDir("up");
-      state.lastReason = r.ok ? "উপরে clicked" : (r.error || "fail");
+      state.lastReason = r.ok ? "উপরে clicked" : (r.error || "fail"); log(r.ok ? "ম্যানুয়াল উপরে OK" : "ম্যানুয়াল উপরে FAIL: " + (r.error || ""));
       saveState(state); render();
     }
     if (act === "down") {
       const r = clickDir("down");
-      state.lastReason = r.ok ? "নিচে clicked" : (r.error || "fail");
+      state.lastReason = r.ok ? "নিচে clicked" : (r.error || ""); log(r.ok ? "ম্যানুয়াল নিচে OK" : "ম্যানুয়াল নিচে FAIL: " + (r.error || ""));
       saveState(state); render();
     }
     if (act === "auto") {
       const snap = scrape.scrapeDocument(document);
-      if (state.auto) state.auto = false;
-      else if (snap.accountMode !== "demo") state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
+      if (state.auto) state.auto = false; log("অটো বন্ধ");
+      else if (snap.accountMode !== "demo") { state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ"; log("লাইভ, অটো চালু হয়নি"); }
       else {
         state.auto = true;
         state.autoCount = 0;
-        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
+        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ"; log("অটো চালু — পেয়ার ঘুরে দেখবে");
         scanWatchlist();
       }
       saveState(state); render();
