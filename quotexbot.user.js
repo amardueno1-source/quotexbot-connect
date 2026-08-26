@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.7.0
-// @description  DEMO HUD: stays on the open chart, no pair switching. Dashboard stores ticks. No cookies/SSID.
+// @version      0.8.0
+// @description  DEMO HUD: one CONFIG, live quote observer, no pair switch. Edit CONFIG only. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -474,18 +474,52 @@
 
   const scrape = globalThis.QuotexbotScrape || null;
 
+  /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
+  const CONFIG = {
+    version: "0.8.0",
+    maxAuto: 10,
+    cooldownMs: 65000,
+    barBucketMs: 15000,
+    minTicks: 3,
+    sampleTicks: 16,
+    sampleMs: 250,
+    recordMs: 400,
+    uiMs: 2500,
+    minBarsForEma: 21,
+    emaFast: 8,
+    emaSlow: 21,
+    rsiPeriod: 14,
+    bodyMin: 0.45,
+    wickMax: 0.28,
+    emaSep: 0.00003,
+    rsiCall: [48, 68],
+    rsiPut: [32, 52],
+    ranges: {
+      "USD/JPY": [90, 200],
+      "EUR/JPY": [140, 220],
+      "GBP/JPY": [160, 250],
+      "EUR/USD": [0.9, 1.35],
+      "GBP/USD": [1.20, 1.55],
+      "AUD/USD": [0.5, 0.85],
+      "AUD/NZD": [0.9, 1.25],
+      "USD/CAD": [1.2, 1.55],
+    },
+    watch: [
+      { yahoo: "EURUSD=X", label: "EUR/USD" },
+      { yahoo: "GBPUSD=X", label: "GBP/USD" },
+      { yahoo: "USDJPY=X", label: "USD/JPY" },
+      { yahoo: "AUDUSD=X", label: "AUD/USD" },
+      { yahoo: "AUDNZD=X", label: "AUD/NZD" },
+      { yahoo: "USDCAD=X", label: "USD/CAD" },
+      { yahoo: "EURJPY=X", label: "EUR/JPY" },
+      { yahoo: "GBPJPY=X", label: "GBP/JPY" },
+    ],
+  };
+
   const KEY = "quotexbot_tm_state";
-  const MAX_AUTO = 10;
-  const WATCH = [
-    { yahoo: "EURUSD=X", label: "EUR/USD" },
-    { yahoo: "GBPUSD=X", label: "GBP/USD" },
-    { yahoo: "USDJPY=X", label: "USD/JPY" },
-    { yahoo: "AUDUSD=X", label: "AUD/USD" },
-    { yahoo: "AUDNZD=X", label: "AUD/NZD" },
-    { yahoo: "USDCAD=X", label: "USD/CAD" },
-    { yahoo: "EURJPY=X", label: "EUR/JPY" },
-    { yahoo: "GBPJPY=X", label: "GBP/JPY" },
-  ];
+  const VER = CONFIG.version;
+  const MAX_AUTO = CONFIG.maxAuto;
+  const WATCH = CONFIG.watch;
 
   function loadState() {
     try {
@@ -502,8 +536,7 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.7.0";
-  let state = Object.assign({
+    let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false, dashOpen: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
     logs: [], ver: "", pairStats: {}, journal: [],
@@ -558,14 +591,8 @@
 
   function priceRange(pairLabel) {
     const p = pairLabel || "";
-    if (p === "USD/JPY") return { lo: 90, hi: 200 };
-    if (p === "EUR/JPY") return { lo: 140, hi: 220 };
-    if (p === "GBP/JPY") return { lo: 160, hi: 250 };
-    if (p === "EUR/USD") return { lo: 0.9, hi: 1.35 };
-    if (p === "GBP/USD") return { lo: 1.15, hi: 1.55 };
-    if (p === "AUD/USD") return { lo: 0.5, hi: 0.85 };
-    if (p === "AUD/NZD") return { lo: 0.9, hi: 1.25 };
-    if (p === "USD/CAD") return { lo: 1.2, hi: 1.55 };
+    const r = CONFIG.ranges[p];
+    if (r) return { lo: r[0], hi: r[1] };
     if (/JPY/i.test(p)) return { lo: 90, hi: 250 };
     return { lo: 0.05, hi: 20 };
   }
@@ -640,14 +667,14 @@
 
   async function sampleOtc(label) {
     const ticks = [];
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < CONFIG.sampleTicks; i++) {
       if (visiblePair() !== label) {
-        await sleep(250);
+        await sleep(CONFIG.sampleMs);
         continue;
       }
       const px = readLivePrice(label);
       if (px != null) ticks.push(px);
-      await sleep(250);
+      await sleep(CONFIG.sampleMs);
     }
     return ticks;
   }
@@ -657,12 +684,12 @@
     if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
     if (!Array.isArray(state.otcBars[label])) state.otcBars[label] = [];
     const bars = state.otcBars[label];
-    const bucket = Math.floor(Date.now() / 15000);
+    const bucket = Math.floor(Date.now() / CONFIG.barBucketMs);
     for (let i = 0; i < ticks.length; i++) {
       const px = ticks[i];
       let bar = bars.length && bars[bars.length - 1].m === bucket ? bars[bars.length - 1] : null;
       if (!bar) {
-        bar = { m: bucket, t: bucket * 15, open: px, high: px, low: px, close: px, n: 1 };
+        bar = { m: bucket, t: bucket * (CONFIG.barBucketMs / 1000), open: px, high: px, low: px, close: px, n: 1 };
         bars.push(bar);
       } else {
         bar.high = Math.max(bar.high, px);
@@ -735,7 +762,7 @@
   }
 
   function decideTicks(ticks) {
-    if (ticks.length < 3) return { signal: "SKIP", reason: "OTC tick কম" };
+    if (ticks.length < CONFIG.minTicks) return { signal: "SKIP", reason: "OTC tick কম" };
     const first = ticks[0], last = ticks[ticks.length - 1];
     if (last > first) return { signal: "CALL", reason: "OTC live up " + first + " → " + last };
     if (last < first) return { signal: "PUT", reason: "OTC live down " + first + " → " + last };
@@ -767,9 +794,9 @@
   }
 
   function decide(bar, closes) {
-    const fast = ema(closes, 8);
-    const slow = ema(closes, 21);
-    const r = rsi(closes, 14);
+    const fast = ema(closes, CONFIG.emaFast);
+    const slow = ema(closes, CONFIG.emaSlow);
+    const r = rsi(closes, CONFIG.rsiPeriod);
     if (fast == null || slow == null || r == null) return { signal: "SKIP", reason: "history কম" };
     const range = bar.high - bar.low;
     if (range <= 0) return { signal: "SKIP", reason: "flat candle" };
@@ -778,20 +805,20 @@
     const upWick = (bar.high - Math.max(bar.open, bar.close)) / range;
     const dnWick = (Math.min(bar.open, bar.close) - bar.low) / range;
     const sep = Math.abs(fast - slow) / bar.close;
-    if (sep < 0.00003) return { signal: "SKIP", reason: "EMA কাছাকাছি" };
+    if (sep < CONFIG.emaSep) return { signal: "SKIP", reason: "EMA কাছাকাছি" };
     const bull = bar.close > bar.open;
     const bear = bar.close < bar.open;
     if (fast > slow && bull) {
-      if (bodyRatio < 0.45) return { signal: "SKIP", reason: "weak body" };
-      if (upWick > 0.28) return { signal: "SKIP", reason: "upper wick" };
-      if (r < 48 || r > 68) return { signal: "SKIP", reason: "RSI " + r.toFixed(1) };
-      return { signal: "CALL", reason: "uptrend EMA8>21, RSI " + r.toFixed(1) };
+      if (bodyRatio < CONFIG.bodyMin) return { signal: "SKIP", reason: "weak body" };
+      if (upWick > CONFIG.wickMax) return { signal: "SKIP", reason: "upper wick" };
+      if (r < CONFIG.rsiCall[0] || r > CONFIG.rsiCall[1]) return { signal: "SKIP", reason: "RSI " + r.toFixed(1) };
+      return { signal: "CALL", reason: "uptrend EMA" + CONFIG.emaFast + ">" + CONFIG.emaSlow + ", RSI " + r.toFixed(1) };
     }
     if (fast < slow && bear) {
-      if (bodyRatio < 0.45) return { signal: "SKIP", reason: "weak body" };
-      if (dnWick > 0.28) return { signal: "SKIP", reason: "lower wick" };
-      if (r < 32 || r > 52) return { signal: "SKIP", reason: "RSI " + r.toFixed(1) };
-      return { signal: "PUT", reason: "downtrend EMA8<21, RSI " + r.toFixed(1) };
+      if (bodyRatio < CONFIG.bodyMin) return { signal: "SKIP", reason: "weak body" };
+      if (dnWick > CONFIG.wickMax) return { signal: "SKIP", reason: "lower wick" };
+      if (r < CONFIG.rsiPut[0] || r > CONFIG.rsiPut[1]) return { signal: "SKIP", reason: "RSI " + r.toFixed(1) };
+      return { signal: "PUT", reason: "downtrend EMA" + CONFIG.emaFast + "<" + CONFIG.emaSlow + ", RSI " + r.toFixed(1) };
     }
     return { signal: "SKIP", reason: "no aligned setup" };
   }
@@ -928,7 +955,7 @@
   }
 
   function tradeOpen() {
-    return Boolean(lastClickAt && Date.now() - lastClickAt < 65000);
+    return Boolean(lastClickAt && Date.now() - lastClickAt < CONFIG.cooldownMs);
   }
 
   function snapDoc() {
@@ -994,19 +1021,19 @@
 
       const hist = denseBars(p.label);
       let d;
-      if (hist.length >= 21) {
+      if (hist.length >= CONFIG.minBarsForEma) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
         d = { signal: raw.signal, reason: "সেভ হিস্ট্রি " + hist.length + " বার · " + raw.reason };
       } else if (ticks.length >= 3) {
         const live = decideTicks(ticks);
-        d = { signal: live.signal, reason: live.reason + " · জমা " + barCount(p.label) + "/21" };
+        d = { signal: live.signal, reason: live.reason + " · জমা " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
       } else if (bars.length >= 2) {
         const a = bars[bars.length - 2], b = bars[bars.length - 1];
         if (b.close > a.close) d = { signal: "CALL", reason: "সেভ বার up · জমা " + bars.length };
         else if (b.close < a.close) d = { signal: "PUT", reason: "সেভ বার down · জমা " + bars.length };
         else d = { signal: "SKIP", reason: "সেভ বার flat · জমা " + bars.length };
       } else {
-        d = { signal: "SKIP", reason: "OTC দাম পাইনি · জমা " + barCount(p.label) + "/21" };
+        d = { signal: "SKIP", reason: "OTC দাম পাইনি · জমা " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
       }
 
       state.lastSignal = d.signal;
@@ -1021,7 +1048,7 @@
       saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
-      if (Date.now() - lastClickAt < 50000) return;
+      if (Date.now() - lastClickAt < CONFIG.cooldownMs) return;
 
       await sleep(400 + Math.floor(Math.random() * 600));
       const r = clickDir(d.signal === "PUT" ? "down" : "up");
@@ -1160,7 +1187,7 @@
       const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
     }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v0.7.0</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
   }
 
   function render() {
@@ -1168,7 +1195,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.7.0</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v${CONFIG.version}</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -1176,7 +1203,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.7.0</h1>
+        <h1>quotexbot v${CONFIG.version}</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -1185,7 +1212,7 @@
         <div class="row"><span>ব্রাউজ</span><b>সুইচ অফ · এক চার্ট</b></div>
         <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
         <div class="row"><span>OTC দাম</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/21 বার · সেভ</b></div>
+        <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} বার · সেভ</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="btns">
@@ -1272,16 +1299,45 @@
     dash = createDash();
   }
 
+  let lastObservedPx = null;
+  function onQuoteTick() {
+    const label = visiblePair();
+    if (!label) return;
+    const px = readLivePrice(label);
+    if (px == null || px === lastObservedPx) return;
+    lastObservedPx = px;
+    ingestTicks(label, [px]);
+    state.lastPx = String(px);
+    notePair(label, { px: String(px), bars: barCount(label) });
+    if (root && root.isConnected) {
+      const row = root.querySelectorAll(".row b")[3];
+      if (row) row.textContent = state.lastPx;
+    }
+  }
+
+  function startQuoteObserver() {
+    if (window.__quotexbotObs) return;
+    window.__quotexbotObs = true;
+    try {
+      const obs = new MutationObserver(function () { onQuoteTick(); });
+      obs.observe(document.body || document.documentElement, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+    } catch (_e) {}
+    setInterval(onQuoteTick, CONFIG.recordMs);
+  }
+
   setInterval(function () {
     ensureHud();
-    recordVisible();
     if (state.auto) scanWatchlist();
     else render();
-  }, 2500);
+  }, CONFIG.uiMs);
 
-  setInterval(recordVisible, 1000);
+  startQuoteObserver();
 
-  log(scrape ? "HUD চালু v0.7.0" : "HUD চালু, scrape নেই");
+  log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
   render();
   renderDash();
   if (state.auto) scanWatchlist();
