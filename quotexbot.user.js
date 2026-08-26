@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.5.0
+// @version      0.5.1
 // @description  DEMO HUD: each pair keeps saved OTC history and decides from it. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -498,7 +498,7 @@
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
 
-  const VER = "0.5.0";
+  const VER = "0.5.1";
   let state = Object.assign({
     connected: true, auto: false, minimized: false, liveAck: false,
     autoCount: 0, lastSignal: "—", lastReason: "", lastPair: "—", lastBar: "",
@@ -529,38 +529,86 @@
   let browseIndex = 0;
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-  function readLivePrice(pairLabel) {
+  function priceRange(pairLabel) {
+    if (/JPY/i.test(pairLabel || "")) return { lo: 20, hi: 400 };
+    if (/XAU|GOLD|GOLD/i.test(pairLabel || "")) return { lo: 800, hi: 5000 };
+    return { lo: 0.05, hi: 20 };
+  }
+
+  function scrapeQuoteCandidates() {
     const hud = document.getElementById("quotexbot-hud");
-    const jpy = /JPY/i.test(pairLabel || "");
-    const nodes = document.querySelectorAll("span, div, b, strong, p, label");
-    const cands = [];
+    const found = [];
+    const seen = {};
+    function add(v, el, decimals) {
+      if (!isFinite(v) || v <= 0) return;
+      const key = String(v);
+      if (seen[key]) return;
+      seen[key] = 1;
+      let r = { width: 0, height: 0, top: 0, left: 0 };
+      try { r = el.getBoundingClientRect(); } catch (_e) {}
+      if (r.width < 4 || r.height < 4) return;
+      if (r.top < 0 || r.left < 0) return;
+      let font = 12;
+      try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e2) {}
+      found.push({ v: v, font: font, area: r.width * r.height, y: r.top, x: r.left, decimals: decimals });
+    }
+    const re = /(\d{1,4}(?:\.\d{2,6}))/g;
+    const nodes = document.querySelectorAll("span, div, b, strong, p, label, em, h1, h2, h3, td, li");
     for (const el of nodes) {
       if (hud && (el === hud || hud.contains(el))) continue;
-      if (el.children && el.children.length > 3) continue;
-      let t = (el.innerText || "").replace(/\s+/g, "").replace(/,/g, "");
-      if (!/^\d+\.\d{2,6}$/.test(t)) continue;
-      const v = parseFloat(t);
-      if (!isFinite(v) || v <= 0) continue;
-      if (jpy) { if (v < 20 || v > 400) continue; }
-      else { if (v < 0.05 || v > 20) continue; }
-      let r;
-      try { r = el.getBoundingClientRect(); } catch (_e) { continue; }
-      if (!r || r.width < 8 || r.height < 8) continue;
-      let font = 12;
-      try { font = parseFloat((window.getComputedStyle(el).fontSize || "12")); } catch (_e2) {}
-      cands.push({ v: v, font: font, area: r.width * r.height, y: r.top });
+      let raw = "";
+      try { raw = (el.innerText || el.textContent || ""); } catch (_e3) { continue; }
+      raw = raw.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+      if (!raw || raw.length > 24) continue;
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(raw))) {
+        const s = m[1];
+        const decimals = (s.split(".")[1] || "").length;
+        add(parseFloat(s), el, decimals);
+      }
     }
-    if (!cands.length) return null;
-    cands.sort(function (a, b) { return (b.font - a.font) || (b.area - a.area); });
-    return cands[0].v;
+    try {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (hud && hud.contains(node)) continue;
+        const t = (node.nodeValue || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+        const mm = t.match(/\d{1,4}\.\d{2,6}/);
+        if (!mm) continue;
+        const el = node.parentElement || document.body;
+        add(parseFloat(mm[0]), el, (mm[0].split(".")[1] || "").length);
+      }
+    } catch (_e4) {}
+    return found;
+  }
+
+  function readLivePrice(pairLabel) {
+    const range = priceRange(pairLabel);
+    const all = scrapeQuoteCandidates();
+    const hit = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; });
+    const pool = hit.length ? hit : [];
+    if (!pool.length) return null;
+    pool.sort(function (a, b) {
+      return (b.decimals - a.decimals) || (b.font - a.font) || (b.area - a.area);
+    });
+    return pool[0].v;
+  }
+
+  function peekQuotes(pairLabel) {
+    const range = priceRange(pairLabel);
+    const all = scrapeQuoteCandidates();
+    const shown = all.slice(0, 6).map(function (c) { return String(c.v); }).join(", ");
+    const nIn = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; }).length;
+    return { n: all.length, nIn: nIn, shown: shown };
   }
 
   async function sampleOtc(label) {
     const ticks = [];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 16; i++) {
       const px = readLivePrice(label);
       if (px != null) ticks.push(px);
-      await sleep(350);
+      await sleep(250);
     }
     return ticks;
   }
@@ -877,9 +925,12 @@
       const bars = ingestTicks(p.label, ticks);
       const lastPx = ticks.length ? ticks[ticks.length - 1] : null;
       state.lastPx = lastPx != null ? String(lastPx) : "—";
-      log(lastPx != null
-        ? ("OTC দাম " + p.label + " = " + lastPx + " · " + ticks.length + " tick")
-        : ("OTC দাম পাইনি: " + p.label));
+      if (lastPx != null) {
+        log("OTC দাম " + p.label + " = " + lastPx + " · " + ticks.length + " tick");
+      } else {
+        const peek = peekQuotes(p.label);
+        log("OTC দাম পাইনি: " + p.label + " · পেজে " + peek.n + " নম্বর (" + (peek.shown || "খালি") + ")");
+      }
 
       const hist = denseBars(p.label);
       let d;
@@ -973,7 +1024,7 @@
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
       root.className = "mini";
-      root.innerHTML = `<div class="hd"><h1>quotexbot v0.5.0</h1>
+      root.innerHTML = `<div class="hd"><h1>quotexbot v0.5.1</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
@@ -981,7 +1032,7 @@
     root.className = "";
     root.innerHTML = `
       <div class="hd">
-        <h1>quotexbot v0.5.0</h1>
+        <h1>quotexbot v0.5.1</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
@@ -1082,7 +1133,7 @@
 
   setInterval(recordVisible, 1000);
 
-  log(scrape ? "HUD চালু v0.5.0" : "HUD চালু, scrape নেই");
+  log(scrape ? "HUD চালু v0.5.1" : "HUD চালু, scrape নেই");
   render();
   if (state.auto) scanWatchlist();
   } catch (err) {
