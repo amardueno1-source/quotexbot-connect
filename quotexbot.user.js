@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.3
-// @description  DEMO HUD: track right-axis live price tag. One CONFIG, no pair switch. No cookies/SSID.
+// @version      0.8.4
+// @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
 // @match        https://*.market-qx.info/*
@@ -29,6 +29,7 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
@@ -43,6 +44,52 @@
  * store email/password, or call unofficial broker APIs.
  * Connect = read what is already on screen, then optionally click Up/Down.
  */
+
+(function quotexbotLoader() {
+  function verNewer(remote, local) {
+    const a = String(remote).split(".").map(Number);
+    const b = String(local).split(".").map(Number);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = a[i] || 0, y = b[i] || 0;
+      if (x > y) return true;
+      if (x < y) return false;
+    }
+    return false;
+  }
+  if (window.__quotexbotFromPayload) return;
+  const FILE_VER = "0.8.4";
+  const PK = "quotexbot_script_payload";
+  const PV = "quotexbot_script_payload_ver";
+  let cachedVer = "";
+  let cachedTxt = "";
+  try {
+    if (typeof GM_getValue === "function") {
+      cachedVer = String(GM_getValue(PV, "") || "");
+      cachedTxt = String(GM_getValue(PK, "") || "");
+    }
+  } catch (_e) {}
+  if (cachedTxt && cachedVer && verNewer(cachedVer, FILE_VER)) {
+    window.__quotexbotFromPayload = true;
+    try {
+      const code = cachedTxt.replace(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/, "");
+      Function(code)();
+      window.__quotexbotAbortInstalled = true;
+    } catch (err) {
+      window.__quotexbotFromPayload = false;
+      window.__quotexbotAbortInstalled = false;
+      try {
+        if (typeof GM_setValue === "function") {
+          GM_setValue(PK, "");
+          GM_setValue(PV, "");
+        }
+      } catch (_e2) {}
+      try { console.error("[quotexbot] payload", err); } catch (_e3) {}
+    }
+  }
+})();
+if (window.__quotexbotAbortInstalled) {
+  /* newer payload already running; skip this installed copy */
+} else {
 (function (root) {
   "use strict";
 
@@ -480,7 +527,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.3",
+    version: "0.8.4",
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
@@ -1434,37 +1481,74 @@
     return false;
   }
 
+  function bustUrl(url) {
+    if (!url) return url;
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "cb=" + Date.now();
+  }
+
+  function clearOldCache() {
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && k.indexOf("quotexbot_") === 0) sessionStorage.removeItem(k);
+      }
+    } catch (_e) {}
+  }
+
+  function savePayload(txt, ver) {
+    try {
+      if (typeof GM_setValue === "function") {
+        GM_setValue("quotexbot_script_payload", txt);
+        GM_setValue("quotexbot_script_payload_ver", ver);
+      }
+    } catch (_e) {}
+  }
+
   function checkRemoteVersion() {
     const url = CONFIG.updateUrl;
     if (!url) return;
     function done(txt) {
-      const m = String(txt).match(/@version\s+([0-9.]+)/);
+      const raw = String(txt || "");
+      const m = raw.match(/@version\s+([0-9.]+)/);
       if (!m) return;
       const remote = m[1];
       if (!verNewer(remote, CONFIG.version)) return;
       log("GitHub-এ নতুন v" + remote + " (এখন v" + CONFIG.version + ")");
-      state.lastReason = "আপডেট v" + remote;
+      state.lastReason = "আপডেট v" + remote + " · ক্যাশ ক্লিয়ার";
+      savePayload(raw, remote);
+      clearOldCache();
       const key = "quotexbot_reloaded_" + remote;
       let already = false;
       try { already = sessionStorage.getItem(key) === "1"; } catch (_e) {}
       if (CONFIG.autoReloadOnUpdate && !already) {
         try { sessionStorage.setItem(key, "1"); } catch (_e2) {}
-        log("নতুন ভার্সন নিতে পেজ রিফ্রেশ");
+        log("পুরনো ক্যাশ কাটা, নতুন v" + remote + " রিফ্রেশ");
         location.reload();
         return;
       }
       render();
     }
+    const fetchUrl = bustUrl(url);
     try {
       if (typeof GM_xmlhttpRequest === "function") {
-        GM_xmlhttpRequest({ method: "GET", url: url, onload: function (res) { done(res.responseText); }, onerror: function () {} });
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: fetchUrl,
+          headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
+          onload: function (res) { done(res.responseText); },
+          onerror: function () {},
+        });
         return;
       }
     } catch (_e3) {}
-    try { fetch(url).then(function (r) { return r.text(); }).then(done).catch(function () {}); } catch (_e4) {}
+    try {
+      fetch(fetchUrl, { cache: "no-store" }).then(function (r) { return r.text(); }).then(done).catch(function () {});
+    } catch (_e4) {}
   }
 
   checkRemoteVersion();
+  setTimeout(checkRemoteVersion, 5000);
+  setTimeout(checkRemoteVersion, 30000);
   setInterval(checkRemoteVersion, CONFIG.checkUpdateMs);
 
   log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
@@ -1482,3 +1566,4 @@
     try { console.error("[quotexbot]", err); } catch (_e2) {}
   }
 })();
+}
