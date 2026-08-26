@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.0
+// @version      0.8.1
 // @description  DEMO HUD: one CONFIG, live quote observer, no pair switch. Edit CONFIG only. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -26,6 +26,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @all_frames   true
@@ -476,7 +478,10 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.0",
+    version: "0.8.1",
+    updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
+    checkUpdateMs: 120000,
+    autoReloadOnUpdate: true,
     maxAuto: 10,
     cooldownMs: 65000,
     barBucketMs: 15000,
@@ -1336,6 +1341,50 @@
   }, CONFIG.uiMs);
 
   startQuoteObserver();
+
+  function verNewer(remote, local) {
+    const a = String(remote).split(".").map(Number);
+    const b = String(local).split(".").map(Number);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = a[i] || 0, y = b[i] || 0;
+      if (x > y) return true;
+      if (x < y) return false;
+    }
+    return false;
+  }
+
+  function checkRemoteVersion() {
+    const url = CONFIG.updateUrl;
+    if (!url) return;
+    function done(txt) {
+      const m = String(txt).match(/@version\s+([0-9.]+)/);
+      if (!m) return;
+      const remote = m[1];
+      if (!verNewer(remote, CONFIG.version)) return;
+      log("GitHub-এ নতুন v" + remote + " (এখন v" + CONFIG.version + ")");
+      state.lastReason = "আপডেট v" + remote;
+      const key = "quotexbot_reloaded_" + remote;
+      let already = false;
+      try { already = sessionStorage.getItem(key) === "1"; } catch (_e) {}
+      if (CONFIG.autoReloadOnUpdate && !already) {
+        try { sessionStorage.setItem(key, "1"); } catch (_e2) {}
+        log("নতুন ভার্সন নিতে পেজ রিফ্রেশ");
+        location.reload();
+        return;
+      }
+      render();
+    }
+    try {
+      if (typeof GM_xmlhttpRequest === "function") {
+        GM_xmlhttpRequest({ method: "GET", url: url, onload: function (res) { done(res.responseText); }, onerror: function () {} });
+        return;
+      }
+    } catch (_e3) {}
+    try { fetch(url).then(function (r) { return r.text(); }).then(done).catch(function () {}); } catch (_e4) {}
+  }
+
+  checkRemoteVersion();
+  setInterval(checkRemoteVersion, CONFIG.checkUpdateMs);
 
   log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
   render();
