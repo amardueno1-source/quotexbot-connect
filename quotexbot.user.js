@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.3.2
+// @version      0.3.3
 // @description  DEMO HUD: browses pairs on the trade page like a trader, then Up/Down. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -804,12 +804,17 @@
     }
     if (act === "auto") {
       const snap = scrape.scrapeDocument(document);
-      if (state.auto) state.auto = false; log("অটো বন্ধ");
-      else if (snap.accountMode !== "demo") { state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ"; log("লাইভ, অটো চালু হয়নি"); }
-      else {
+      if (state.auto) {
+        state.auto = false;
+        log("অটো বন্ধ");
+      } else if (snap.accountMode !== "demo") {
+        state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
+        log("লাইভ, অটো চালু হয়নি");
+      } else {
         state.auto = true;
         state.autoCount = 0;
-        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ"; log("অটো চালু — পেয়ার ঘুরে দেখবে");
+        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
+        log("অটো চালু — পেয়ার ঘুরে দেখবে");
         scanWatchlist();
       }
       saveState(state); render();
