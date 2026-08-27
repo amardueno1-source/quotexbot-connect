@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.41-ext)
+ * quotexbot Chrome MV3 content script (v0.9.42-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -544,7 +544,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.41-ext",
+    version: "0.9.42-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -3643,17 +3643,15 @@
     return left > 0 ? left : 0;
   }
   function tradeBusy() {
-    if (clickLock) return true;
     if (realTradeOpenNow()) return true;
     try { if (platformIdleNoTrade()) return false; } catch (_eI) {}
+    if (clickLock) return true;
     if (pendingJournal()) return true;
     return false;
   }
   function tradeOpen() {
-    if (tradeBusy()) return true;
-    try { if (platformIdleNoTrade()) return false; } catch (_eI2) {}
-    if (cooldownLeftMs() > 0) return true;
-    return false;
+    try { if (platformIdleNoTrade()) return false; } catch (_eI0) {}
+    try { return !!realTradeOpenNow(); } catch (_eI1) { return false; }
   }
   function liveOcrAgeMs() {
     if (lastCanvasOcr && lastCanvasOcr.v != null && lastCanvasOcr.at) {
@@ -3686,17 +3684,21 @@
   }
   function tradeWaitSec() {
     const ev = liveOpenEvidence();
+    if (!(ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved)) return 0;
     if (ev.rowCd != null && ev.rowCd > 2) return ev.rowCd;
     if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
-    if (ev.reserved) {
-      const last = lastOkJournal();
-      if (last && !last.result && (last.t || 0) >= bootAt) {
-        const dur = saneDurMs(last.durMs);
-        const left = Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000);
-        if (left > 2) return left;
-      }
-    }
+    /* reserved only: never invent leftover duration (56s/45s/1s) from pending journal */
     return 0;
+  }
+  function isGhostWaitReason(r) {
+    return /trade open|cooldown|wait\s*\d+\s*s/i.test(String(r || ""));
+  }
+  function clearGhostWaitReason() {
+    try {
+      const live = realTradeOpenNow();
+      const left = live ? tradeWaitSec() : 0;
+      if ((!live || left <= 2) && isGhostWaitReason(state.lastReason)) state.lastReason = "";
+    } catch (_eG) {}
   }
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
@@ -3798,14 +3800,20 @@
     if (!scrape) return { ok: false, error: "scrape missing" };
     const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
-    if (tradeBusy()) return { ok: false, error: "Trade open, wait " + tradeWaitSec() + "s" };
-    try { if (expiryTooClose()) return { ok: false, error: "Trade open, wait " + tradeWaitSec() + "s" }; } catch (_eEx) {}
+    if (tradeBusy()) {
+      const w = tradeWaitSec();
+      return { ok: false, error: w > 2 ? ("Trade open, wait " + w + "s") : "Trade open" };
+    }
+    try { if (expiryTooClose()) { const w2 = tradeWaitSec(); return { ok: false, error: w2 > 2 ? ("Trade open, wait " + w2 + "s") : "Trade open" }; } } catch (_eEx) {}
     try { await ensureDurationMode(); } catch (_eDur) {}
     if (snap.accountMode === "demo") {
       try { await applyMoneyManagement(); } catch (_eMm) {}
     }
-    if (tradeBusy()) return { ok: false, error: "Trade open, wait " + tradeWaitSec() + "s" };
-    try { if (expiryTooClose()) return { ok: false, error: "Trade open, wait " + tradeWaitSec() + "s" }; } catch (_eEx2) {}
+    if (tradeBusy()) {
+      const w = tradeWaitSec();
+      return { ok: false, error: w > 2 ? ("Trade open, wait " + w + "s") : "Trade open" };
+    }
+    try { if (expiryTooClose()) { const w2 = tradeWaitSec(); return { ok: false, error: w2 > 2 ? ("Trade open, wait " + w2 + "s") : "Trade open" }; } } catch (_eEx2) {}
     capturePreClickMoney();
     if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
     let fpBefore = "";
@@ -3855,23 +3863,31 @@
       }
       if (tradeOpen()) {
         const left = tradeWaitSec();
-        if (left > 0) state.lastReason = "Trade open, wait " + left + "s";
-        else state.lastReason = "Trade open, wait 0s";
-        const sig = "wait:" + String(left);
-        if (sig !== lastWaitLogSig) {
-          lastWaitLogSig = sig;
-          log("Waiting on last trade/cooldown " + left + "s");
+        if (left > 2) {
+          state.lastReason = "Trade open, wait " + left + "s";
+          const sig = "wait:" + String(left);
+          if (sig !== lastWaitLogSig) {
+            lastWaitLogSig = sig;
+            log("Waiting on last trade " + left + "s");
+          }
+        } else {
+          lastWaitLogSig = "";
+          clearGhostWaitReason();
         }
         saveState(state); render();
         return;
       }
       lastWaitLogSig = "";
+      clearGhostWaitReason();
       try {
         if (expiryTooClose()) {
-          state.lastReason = "Trade open, wait " + tradeWaitSec() + "s";
-          log("Trade open, wait " + tradeWaitSec() + "s");
-          saveState(state); render();
-          return;
+          const leftEx = tradeWaitSec();
+          if (leftEx > 2) {
+            state.lastReason = "Trade open, wait " + leftEx + "s";
+            log("Trade open, wait " + leftEx + "s");
+            saveState(state); render();
+            return;
+          }
         }
       } catch (_eEx0) {}
 
@@ -3937,12 +3953,12 @@
       saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
-      if (tradeOpen()) { log("Trade open, wait " + tradeWaitSec() + "s"); return; }
-      try { if (expiryTooClose()) { log("Trade open, wait " + tradeWaitSec() + "s"); return; } } catch (_eEx1) {}
+      if (tradeOpen()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); return; }
+      try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx1) {}
 
       await sleep(400 + Math.floor(Math.random() * 600));
-      if (tradeOpen()) { log("Trade open, wait " + tradeWaitSec() + "s"); return; }
-      try { if (expiryTooClose()) { log("Trade open, wait " + tradeWaitSec() + "s"); return; } } catch (_eEx2) {}
+      if (tradeOpen()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); return; }
+      try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx2) {}
       if (!(await waitForFreshOcr(1600))) {
         state.lastReason = "Price stale, skip";
         log("Price stale, skip");
@@ -3951,7 +3967,9 @@
       }
       const r = await clickDir(d.signal === "PUT" ? "down" : "up");
       if (r && /Trade open/.test(String(r.error || ""))) {
-        log("Trade open, wait " + tradeWaitSec() + "s");
+        const w = tradeWaitSec();
+        if (w > 2) log("Trade open, wait " + w + "s");
+        else clearGhostWaitReason();
         return;
       }
       if (r && r.missed) {
@@ -4319,7 +4337,7 @@
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
         <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
-        <p class="note">${(function(){ try { if (realTradeOpenNow()) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (/wait\s*1s/i.test(r) || /trade open,\s*wait\s*[12]s/i.test(r)) r = ""; return r || "Pair switch off. Save price and trade on the open chart."; })()}</p>
+        <p class="note">${(function(){ try { clearGhostWaitReason(); const ev = liveOpenEvidence(); if (ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (isGhostWaitReason(r)) r = ""; return r || "Pair switch off. Save price and trade on the open chart."; })()}</p>
         <div class="logh"><span>Log · what the bot is doing</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -4341,8 +4359,12 @@
     if (act === "up" || act === "down") {
       if (tradeBusy()) {
         const left = tradeWaitSec();
-        log("Trade open, wait " + left + "s");
-        state.lastReason = "Trade open, wait " + left + "s";
+        if (left > 2) {
+          log("Trade open, wait " + left + "s");
+          state.lastReason = "Trade open, wait " + left + "s";
+        } else {
+          clearGhostWaitReason();
+        }
         saveState(state); render();
         return;
       }
@@ -4354,8 +4376,12 @@
         const r = await clickDir(act);
         if (r && /Trade open/.test(String(r.error || ""))) {
           const left = tradeWaitSec();
-          log("Trade open, wait " + left + "s");
-          state.lastReason = "Trade open, wait " + left + "s";
+          if (left > 2) {
+            log("Trade open, wait " + left + "s");
+            state.lastReason = "Trade open, wait " + left + "s";
+          } else {
+            clearGhostWaitReason();
+          }
         } else if (r && r.missed) {
           state.lastReason = "Click missed, not journaled";
         } else if (r && r.ok) {
@@ -4604,11 +4630,7 @@
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
     try { maybeApplyMmIdle(); } catch (_eMm) {}
-    try {
-      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
-        state.lastReason = "";
-      }
-    } catch (_eW1) {}
+    try { clearGhostWaitReason(); } catch (_eW1) {}
     if (state.auto) scanWatchlist();
     else {
       let waitSig = "";

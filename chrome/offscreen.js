@@ -1,5 +1,5 @@
 /**
- * quotexbot offscreen OCR host (v0.9.41-ext)
+ * quotexbot offscreen OCR host (v0.9.42-ext)
  *
  * Tesseract.js wasm cannot run in the MV3 service worker. This hidden
  * extension page loads the vendored worker + wasm + eng.traineddata and

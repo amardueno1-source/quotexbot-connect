@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.41
+// @version      0.9.42
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -600,7 +600,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.41",
+    version: "0.9.42",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -3068,17 +3068,15 @@ if (window.__quotexbotAbortInstalled) {
     return left > 0 ? left : 0;
   }
   function tradeBusy() {
-    if (clickLock) return true;
     if (realTradeOpenNow()) return true;
     try { if (platformIdleNoTrade()) return false; } catch (_eI) {}
+    if (clickLock) return true;
     if (pendingJournal()) return true;
     return false;
   }
   function tradeOpen() {
-    if (tradeBusy()) return true;
-    try { if (platformIdleNoTrade()) return false; } catch (_eI2) {}
-    if (cooldownLeftMs() > 0) return true;
-    return false;
+    try { if (platformIdleNoTrade()) return false; } catch (_eI0) {}
+    try { return !!realTradeOpenNow(); } catch (_eI1) { return false; }
   }
   function liveOcrAgeMs() {
     if (lastGoodPxAt) return Date.now() - lastGoodPxAt;
@@ -3098,17 +3096,21 @@ if (window.__quotexbotAbortInstalled) {
   }
   function tradeWaitSec() {
     const ev = liveOpenEvidence();
+    if (!(ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved)) return 0;
     if (ev.rowCd != null && ev.rowCd > 2) return ev.rowCd;
     if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
-    if (ev.reserved) {
-      const last = lastOkJournal();
-      if (last && !last.result && (last.t || 0) >= bootAt) {
-        const dur = saneDurMs(last.durMs);
-        const left = Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000);
-        if (left > 2) return left;
-      }
-    }
+    /* reserved only: never invent leftover duration (56s/45s/1s) from pending journal */
     return 0;
+  }
+  function isGhostWaitReason(r) {
+    return /trade open|cooldown|wait\s*\d+\s*s/i.test(String(r || ""));
+  }
+  function clearGhostWaitReason() {
+    try {
+      const live = realTradeOpenNow();
+      const left = live ? tradeWaitSec() : 0;
+      if ((!live || left <= 2) && isGhostWaitReason(state.lastReason)) state.lastReason = "";
+    } catch (_eG) {}
   }
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
@@ -3233,16 +3235,22 @@ if (window.__quotexbotAbortInstalled) {
       }
       if (tradeOpen()) {
         const left = tradeWaitSec();
-        state.lastReason = "Trade open, wait " + left + "s";
-        const sig = "wait:" + String(left);
-        if (sig !== lastWaitLogSig) {
-          lastWaitLogSig = sig;
-          log("Waiting on last trade/cooldown " + left + "s");
+        if (left > 2) {
+          state.lastReason = "Trade open, wait " + left + "s";
+          const sig = "wait:" + String(left);
+          if (sig !== lastWaitLogSig) {
+            lastWaitLogSig = sig;
+            log("Waiting on last trade " + left + "s");
+          }
+        } else {
+          lastWaitLogSig = "";
+          clearGhostWaitReason();
         }
         saveState(state); render();
         return;
       }
       lastWaitLogSig = "";
+      clearGhostWaitReason();
 
       const vis = visiblePair();
       const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;
@@ -3676,7 +3684,7 @@ if (window.__quotexbotAbortInstalled) {
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
         <button class="dashbtn" type="button" data-act="dash">ড্যাশবোর্ড</button>
-        <p class="note">${(function(){ try { if (realTradeOpenNow()) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (/wait\s*1s/i.test(r) || /trade open,\s*wait\s*[12]s/i.test(r)) r = ""; return r || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"; })()}</p>
+        <p class="note">${(function(){ try { clearGhostWaitReason(); const ev = liveOpenEvidence(); if (ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (isGhostWaitReason(r)) r = ""; return r || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"; })()}</p>
         <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -3861,14 +3869,12 @@ if (window.__quotexbotAbortInstalled) {
     settlePendingJournal();
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
-    try {
-      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
-        state.lastReason = "";
-      }
-    } catch (_eW1) {}
+    try { clearGhostWaitReason(); } catch (_eW1) {}
     if (state.auto) scanWatchlist();
     else {
-      const sig = String(state.lastPx) + "\0" + String(state.lastPair);
+      let waitSig = "";
+      try { if (realTradeOpenNow()) waitSig = "w" + String(tradeWaitSec()); } catch (_eW) {}
+      const sig = String(state.lastPx) + "\0" + String(state.lastPair) + "\0" + waitSig + "\0" + String(state.lastReason || "");
       if (sig === lastHudSig) return;
       lastHudSig = sig;
       render();
@@ -3966,11 +3972,7 @@ if (window.__quotexbotAbortInstalled) {
   setTimeout(function () {
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
-    try {
-      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
-        state.lastReason = "";
-      }
-    } catch (_eW1) {}
+    try { clearGhostWaitReason(); } catch (_eW1) {}
     if (state.auto) scanWatchlist();
   }, 600);
   } catch (err) {
