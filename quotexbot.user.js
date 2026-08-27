@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.6
+// @version      0.8.7
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.6";
+  const FILE_VER = "0.8.7";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.6",
+    version: "0.8.7",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -793,24 +793,57 @@ if (window.__quotexbotAbortInstalled) {
     return hits[0];
   }
 
+  const quoteSeen = {};
+  function rememberQuotes(vals) {
+    const now = Date.now();
+    const live = {};
+    for (let i = 0; i < vals.length; i++) {
+      const k = String(vals[i]);
+      live[k] = 1;
+      if (!quoteSeen[k]) quoteSeen[k] = { first: now, last: now, v: vals[i] };
+      else quoteSeen[k].last = now;
+    }
+    Object.keys(quoteSeen).forEach(function (k) { if (!live[k] && now - quoteSeen[k].last > 15000) delete quoteSeen[k]; });
+  }
+  function isFrozenQuote(v) {
+    const s = quoteSeen[String(v)];
+    return !!(s && (s.last - s.first) > 7000);
+  }
+
   function readLivePrice(pairLabel) {
     const range = priceRange(pairLabel);
     const axis = readAxisLivePrice();
-    if (axis && axis.v != null) {
+    const all = scrapeQuoteCandidates();
+    const pool = [];
+    if (axis && axis.v != null) pool.push(axis.v);
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].v >= range.lo && all[i].v <= range.hi) pool.push(all[i].v);
+    }
+    rememberQuotes(pool);
+    function usable(v) {
+      if (v == null || !isFinite(v)) return false;
+      if (isFrozenQuote(v) && pool.some(function (x) { return x !== v && !isFrozenQuote(x); })) return false;
+      return true;
+    }
+    if (axis && axis.v != null && usable(axis.v)) {
       if (!range || (axis.v >= range.lo && axis.v <= range.hi) || range.hi >= 1000) {
         if (pairLabel) {
           if (!state.learnedRange || typeof state.learnedRange !== "object") state.learnedRange = {};
           const pad = Math.max(axis.v * 0.35, 1);
           state.learnedRange[pairLabel] = { lo: Math.max(0.01, axis.v - pad), hi: axis.v + pad };
         }
-        if (!range || axis.v >= range.lo * 0.5) return axis.v;
+        return axis.v;
       }
     }
-    const all = scrapeQuoteCandidates();
-    const hit = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; });
-    if (!hit.length) return (axis && axis.v != null) ? axis.v : null;
+    const hit = all.filter(function (c) {
+      return c.v >= range.lo && c.v <= range.hi && usable(c.v);
+    });
+    if (!hit.length) {
+      const unfrozen = pool.filter(function (v) { return usable(v); });
+      return unfrozen.length ? unfrozen[0] : null;
+    }
     hit.sort(function (a, b) {
-      return (b.font - a.font) || (b.area - a.area);
+      return (b.x - a.x) || (b.font - a.font) || (b.area - a.area);
     });
     return hit[0].v;
   }
@@ -1201,13 +1234,15 @@ if (window.__quotexbotAbortInstalled) {
       }
 
       const vis = visiblePair();
-      const p = vis ? { label: vis } : null;
+      const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;
+      const p = (vis || fallback) ? { label: vis || fallback } : null;
       if (!p) {
         log("চার্টে পেয়ার ধরা যায়নি, সুইচ করব না");
         state.lastReason = "পেয়ার খোলা রাখো, সুইচ অফ";
         saveState(state); render();
         return;
       }
+      if (!vis && fallback) log("পেয়ার ট্যাব অস্থির, খোলা চার্ট ধরে: " + fallback);
 
       state.lastPair = p.label;
       state.lastSignal = "…";
@@ -1232,7 +1267,7 @@ if (window.__quotexbotAbortInstalled) {
       if (hist.length >= CONFIG.minBarsForEma) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
         d = { signal: raw.signal, reason: "সেভ হিস্ট্রি " + hist.length + " বার · " + raw.reason };
-      } else if (ticks.length >= 3) {
+      } else if (ticks.length >= CONFIG.minTicks) {
         const live = decideTicks(ticks);
         d = { signal: live.signal, reason: live.reason + " · জমা " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
       } else if (bars.length >= 2) {
@@ -1283,7 +1318,7 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   const HUD_CSS = `
-    #quotexbot-hud{position:fixed;top:12px;right:12px;z-index:2147483647 !important;width:380px;
+    #quotexbot-hud{position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647 !important;width:380px;
       background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
       user-select:none;display:block !important;visibility:visible !important;opacity:1 !important;
@@ -1346,7 +1381,7 @@ if (window.__quotexbotAbortInstalled) {
     if (old && old.parentNode) old.parentNode.removeChild(old);
     const el = document.createElement("div");
     el.id = "quotexbot-hud";
-    el.setAttribute("style", "position:fixed;top:12px;right:12px;z-index:2147483647;width:380px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:block;visibility:visible;opacity:1;pointer-events:auto;");
+    el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:block;visibility:visible;opacity:1;pointer-events:auto;");
     (document.body || document.documentElement).appendChild(el);
     return el;
   }
