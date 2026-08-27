@@ -1,14 +1,15 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.45-ext)
+ * quotexbot Chrome MV3 content script (v0.9.46-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
  * Live price: Price Now first (Pair Information panel quote, not only a node
- * whose own text is "Price Now"). If that yields a finite v in the pair range,
- * skip screenshot. If div.XfvzC / Pair Information looks open but Price Now
- * has no number, do not return null — fall through to canvas OCR and the cyan
- * last-price tag. Never click the XfvzC heading.
+ * whose own text is "Price Now"). Skip screenshot only when Price Now is live:
+ * finite v AND (v changed vs last Price Now OR last change was < 2500ms).
+ * Same unchanged Price Now for >2.5s must OCR the cyan last-price tag.
+ * Frozen Price Now (isFrozenQuote: same v seen >7s) is not returned as live —
+ * fall through to canvas OCR / readLiveTagByHit. Never click the XfvzC heading.
  * When the popup is closed, click ONLY svg.icon-pair-information (or its
  * nearest small button) on the RIGHT trade panel next to the ACTIVE pair.
  * Never click the pair name, header tabs, asset list, search, leftover chips,
@@ -553,7 +554,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.45-ext",
+    version: "0.9.46-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -623,6 +624,7 @@
   let lastPriceNowEl = null;
   let lastPriceNowOpen = false;
   let lastPnAt = 0;
+  let lastPnV = null;
   let lastPairInfoClickAt = 0;
   let lastPairInfoClickPair = "";
   let lastAssetListDismissAt = 0;
@@ -2060,6 +2062,7 @@
     lastPriceNowEl = null;
     lastPriceNowOpen = false;
     lastPnAt = 0;
+    lastPnV = null;
     lastPairInfoClickAt = 0;
     lastPairInfoClickPair = "";
     lastAssetListDismissAt = 0;
@@ -2079,6 +2082,25 @@
     /* Same FX pair with (OTC)/whitespace flicker — keep lastGoodPx. */
     if (sameFx) return;
     resetLivePrice("Pair changed: " + old + " → " + newLabel + ", price reset");
+  }
+
+  /* Bump lastPnAt only when Price Now v actually changes — never on the same stale number. */
+  function notePriceNowV(v) {
+    if (v == null || !isFinite(Number(v))) return false;
+    const n = Number(v);
+    if (lastPnV == null || Math.abs(n - lastPnV) > 1e-9) {
+      lastPnV = n;
+      lastPnAt = Date.now();
+      return true;
+    }
+    return false;
+  }
+  /* Live Price Now: finite v AND (changed vs last Price Now OR last change < 2500ms). */
+  function priceNowQuoteLive(v) {
+    if (v == null || !isFinite(Number(v))) return false;
+    const n = Number(v);
+    if (lastPnV == null || Math.abs(n - lastPnV) > 1e-9) return true;
+    return !!(lastPnAt && (Date.now() - lastPnAt) < 2500);
   }
 
   function readLivePrice(pairLabel, diag) {
@@ -2189,9 +2211,12 @@
       }
     }
     if (pn && pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) {
-      if (ok(pn.v, pn) || state.lastGoodPx == null) {
-        rememberQuotes([pn.v]);
-        lastPnAt = Date.now();
+      rememberQuotes([pn.v]);
+      /* Frozen Price Now (same v >7s): do not return it; OCR the cyan tag. */
+      if (isFrozenQuote(pn.v)) {
+        /* fall through to canvas OCR / readLiveTagByHit */
+      } else if (ok(pn.v, pn) || state.lastGoodPx == null) {
+        notePriceNowV(pn.v);
         return acceptLivePx(pn.v);
       }
     }
@@ -5082,7 +5107,7 @@
       if (pn && pn.v != null && isFinite(Number(pn.v))) {
         lastPriceNowEl = pn.el || lastPriceNowEl;
         lastPriceNowOpen = true;
-        lastPnAt = Date.now();
+        /* Do not refresh lastPnAt here — only notePriceNowV when v actually changes. */
         return pn;
       }
     } catch (_e) {}
@@ -5099,12 +5124,20 @@
       flushCaptureWaiters();
       return;
     }
-    /* Skip screenshot OCR only when Price Now already has a finite v.
+    /* Skip screenshot OCR only when Price Now is live (freshness, not mere finite v).
+     * Live = finite v AND (v changed vs last Price Now OR last change < 2500ms).
+     * Same unchanged Price Now for >2.5s: do not skip — OCR the cyan tag.
      * A visible XfvzC heading without a quote must still capture the cyan tag. */
     function skipIfPriceNowFinite() {
       try {
         const pn = priceNowAlreadyOpen();
-        if (pn && pn.v != null && isFinite(Number(pn.v))) {
+        if (!pn || pn.v == null || !isFinite(Number(pn.v))) return false;
+        const v = Number(pn.v);
+        /* freshness, not mere finite v: changed vs last Price Now OR last change < 2500ms */
+        const changed = lastPnV == null || Math.abs(v - lastPnV) > 1e-9;
+        const recentChange = lastPnAt && (Date.now() - lastPnAt) < 2500;
+        if ((changed || recentChange) && priceNowQuoteLive(v)) {
+          notePriceNowV(v);
           try { onQuoteTick(); } catch (_ePn) {}
           flushCaptureWaiters();
           return true;

@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.45
+quotexbot Chrome MV3 extension  v0.9.46
 =======================================
 
 Load unpacked
@@ -17,8 +17,11 @@ Stay on the open chart. Auto clicks Up/Down on DEMO only.
 Auto ON only from a trusted Start auto click this session.
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
-only when that quote is a finite number. If XfvzC is visible but Price Now
-has no number, OCR the cyan last-price pill. Never click that heading.
+only when that quote is live (finite v that changed, or last change < 2.5s).
+If the same Price Now number is unchanged >2.5s, OCR the cyan last-price
+pill. Frozen Price Now (same v >7s) is not used as live. If XfvzC is visible
+but Price Now has no number, OCR the cyan last-price pill. Never click that
+heading.
 If closed, click only svg.icon-pair-information on the right-panel active
 pair (not the pair name). If that opens the asset list, close it and do
 not retry. Else screenshot, crop the chart-canvas right-edge cyan/blue
