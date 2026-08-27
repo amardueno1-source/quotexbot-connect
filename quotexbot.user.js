@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.6
+// @version      0.9.7
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.6";
+  const FILE_VER = "0.9.7";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.6",
+    version: "0.9.7",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -669,8 +669,6 @@ if (window.__quotexbotAbortInstalled) {
     if (/COP|BRL|ARS|CLP|INR|IDR|KRW|NGN|DZD|EGP|VND|PKR|TRY|MXN|ZAR|PHP|THB|MYR|BDT|LKR|NPR/i.test(p)) {
       return { lo: 1, hi: 100000 };
     }
-    const learned = state.learnedRange && state.learnedRange[p];
-    if (learned) return learned;
     return { lo: 0.05, hi: 20 };
   }
 
@@ -685,8 +683,10 @@ if (window.__quotexbotAbortInstalled) {
       seen[key] = 1;
       let r = { width: 0, height: 0, top: 0, left: 0 };
       try { r = el.getBoundingClientRect(); } catch (_e) {}
+      const wide = window.innerWidth || 1200;
       if (r.width < 4 || r.height < 4) return;
       if (r.top < 0 || r.left < 0) return;
+      if (r.left > wide * 0.62) return;
       let font = 12;
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e2) {}
       found.push({ v: v, font: font, area: r.width * r.height, y: r.top, x: r.left, decimals: decimals });
@@ -714,6 +714,9 @@ if (window.__quotexbotAbortInstalled) {
       while (walker.nextNode()) {
         const node = walker.currentNode;
         if (hud && hud.contains(node)) continue;
+        const dashEl = document.getElementById("quotexbot-dash");
+        if (dashEl && dashEl.contains(node)) continue;
+        if (/[+\u2212$]/.test(node.nodeValue || "")) continue;
         const t = (node.nodeValue || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
         const mm = t.match(/\d{1,4}\.\d{2,6}/);
         if (!mm) continue;
@@ -820,37 +823,62 @@ if (window.__quotexbotAbortInstalled) {
     return !!(s && (s.last - s.first) > 7000);
   }
 
+  let pnlCache = { t: 0, set: {} };
+  function isPnlNumber(v) {
+    const now = Date.now();
+    if (now - pnlCache.t > 700) {
+      const set = {};
+      try {
+        const snips = listPnlSnippets();
+        for (let i = 0; i < snips.length; i++) set[String(snips[i].pnl)] = 1;
+      } catch (_e) {}
+      const j = state.journal || [];
+      for (let i = 0; i < j.length; i++) {
+        if (j[i] && j[i].pnl != null) set[String(j[i].pnl)] = 1;
+      }
+      pnlCache = { t: now, set: set };
+    }
+    if (pnlCache.set[String(v)]) return true;
+    const keys = Object.keys(pnlCache.set);
+    for (let i = 0; i < keys.length; i++) {
+      if (Math.abs(Number(keys[i]) - v) < 1e-6) return true;
+    }
+    return false;
+  }
+
   function readLivePrice(pairLabel) {
     const range = priceRange(pairLabel);
     const axis = readAxisLivePrice();
     const all = scrapeQuoteCandidates();
-    const pool = [];
-    if (axis && axis.v != null) pool.push(axis.v);
-    for (let i = 0; i < all.length; i++) {
-      if (all[i].v >= range.lo && all[i].v <= range.hi) pool.push(all[i].v);
-    }
-    rememberQuotes(pool);
-    function usable(v) {
+    function ok(v) {
       if (v == null || !isFinite(v)) return false;
-      if (isFrozenQuote(v) && pool.some(function (x) { return x !== v && !isFrozenQuote(x); })) return false;
+      if (v < range.lo || v > range.hi) return false;
+      if (isPnlNumber(v)) return false;
+      if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
       return true;
     }
-    if (axis && axis.v != null && usable(axis.v) && axis.v >= range.lo && axis.v <= range.hi) {
-      if (pairLabel) {
-        if (!state.learnedRange || typeof state.learnedRange !== "object") state.learnedRange = {};
-        const pad = Math.max(axis.v * 0.35, axis.v * 0.02 + 0.01);
-        state.learnedRange[pairLabel] = { lo: Math.max(0.01, axis.v - pad), hi: axis.v + pad };
-      }
-      return axis.v;
+    rememberQuotes([axis && axis.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
+    const cands = [];
+    if (axis && ok(axis.v)) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
+    for (let i = 0; i < all.length; i++) {
+      if (ok(all[i].v)) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
     }
-    const hit = all.filter(function (c) {
-      return c.v >= range.lo && c.v <= range.hi && usable(c.v);
+    if (!cands.length) return null;
+    if (state.lastGoodPx != null) {
+      const near = cands.filter(function (c) {
+        return Math.abs(c.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6) < 0.025;
+      });
+      if (near.length) {
+        near.sort(function (a, b) { return (b.axis - a.axis) || (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell); });
+        state.lastGoodPx = near[0].v;
+        return near[0].v;
+      }
+    }
+    cands.sort(function (a, b) {
+      return (b.axis - a.axis) || (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (b.x - a.x);
     });
-    if (!hit.length) return null;
-    hit.sort(function (a, b) {
-      return (b.x - a.x) || (b.font - a.font) || (b.area - a.area);
-    });
-    return hit[0].v;
+    state.lastGoodPx = cands[0].v;
+    return cands[0].v;
   }
 
   function peekQuotes(pairLabel) {
