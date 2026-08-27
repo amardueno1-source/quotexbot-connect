@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.8
+// @version      0.9.9
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.8";
+  const FILE_VER = "0.9.9";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.8",
+    version: "0.9.9",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.68,
@@ -855,7 +855,25 @@ if (window.__quotexbotAbortInstalled) {
     return false;
   }
 
+  function resetLivePrice(reason) {
+    state.lastGoodPx = null;
+    state.lastPx = "—";
+    lastObservedPx = null;
+    lastAxisEl = null;
+    try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
+    try { if (axisObs) axisObs.disconnect(); } catch (_e2) {}
+    if (reason) log(reason);
+  }
+  function onPairChange(newLabel) {
+    if (!newLabel || newLabel === lastSeenPair) return;
+    const old = lastSeenPair || state.lastPair || "—";
+    lastSeenPair = newLabel;
+    state.lastPair = newLabel;
+    resetLivePrice("পেয়ার বদল: " + old + " → " + newLabel + ", দাম রিসেট");
+  }
+
   function readLivePrice(pairLabel) {
+    onPairChange(pairLabel);
     const range = priceRange(pairLabel);
     const axis = readAxisLivePrice();
     const all = scrapeQuoteCandidates();
@@ -873,7 +891,18 @@ if (window.__quotexbotAbortInstalled) {
       if (ok(all[i].v)) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
     }
     if (!cands.length) return null;
-    if (state.lastGoodPx != null) {
+    let axisCand = null;
+    for (let i = 0; i < cands.length; i++) {
+      if (cands[i].axis) { axisCand = cands[i]; break; }
+    }
+    if (axisCand && state.lastGoodPx != null) {
+      const rel = Math.abs(axisCand.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6);
+      if (rel > 0.04) {
+        state.lastGoodPx = axisCand.v;
+        return axisCand.v;
+      }
+    }
+    if (lastSeenPair === pairLabel && state.lastGoodPx != null) {
       const near = cands.filter(function (c) {
         return Math.abs(c.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6) < 0.025;
       });
@@ -974,9 +1003,10 @@ if (window.__quotexbotAbortInstalled) {
       try {
         const cls = String(el.className || "");
         const aria = (el.getAttribute && el.getAttribute("aria-selected")) || "";
-        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 240;
+        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 400;
         const par = el.parentElement;
         if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 140;
+        if (r.top < 140 && r.left < (window.innerWidth || 1200) * 0.55) extra += 500;
       } catch (_e4) {}
       const score = font * 8 - r.top + (t.length < 18 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0) + extra;
       if (score > bestScore) { bestScore = score; best = lab; }
@@ -985,7 +1015,6 @@ if (window.__quotexbotAbortInstalled) {
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
     if (fromSnap) return fromSnap;
-    if (state.lastPair && state.lastPair !== "—") return state.lastPair;
     return null;
   }
 
@@ -1001,8 +1030,12 @@ if (window.__quotexbotAbortInstalled) {
   function recordVisible() {
     const label = visiblePair();
     if (!label) return;
+    onPairChange(label);
     const px = readLivePrice(label);
-    if (px == null) return;
+    if (px == null) {
+      state.lastPx = "—";
+      return;
+    }
     ingestTicks(label, [px]);
     state.lastPx = String(px);
     notePair(label, { px: String(px), bars: barCount(label) });
@@ -1204,6 +1237,10 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   let lastTradesFp = "";
+  let lastSeenPair = "";
+  let lastObservedPx = null;
+  let axisObs = null;
+  let lastAxisEl = null;
   function parsePnlText(t) {
     const s = String(t || "").replace(/\s+/g, "");
     if (!s) return null;
@@ -1546,6 +1583,7 @@ if (window.__quotexbotAbortInstalled) {
       }
       if (!vis && fallback) log("পেয়ার ট্যাব অস্থির, খোলা চার্ট ধরে: " + fallback);
 
+      if (vis) onPairChange(p.label);
       state.lastPair = p.label;
       state.lastSignal = "…";
       state.lastReason = "খোলা চার্ট: " + p.label;
@@ -1957,12 +1995,20 @@ if (window.__quotexbotAbortInstalled) {
     dash = createDash();
   }
 
-  let lastObservedPx = null;
   function onQuoteTick() {
     const label = visiblePair();
     if (!label) return;
+    onPairChange(label);
     const px = readLivePrice(label);
-    if (px == null || px === lastObservedPx) return;
+    if (px == null) {
+      state.lastPx = "—";
+      if (root && root.isConnected) {
+        const row = root.querySelectorAll(".row b")[3];
+        if (row) row.textContent = "—";
+      }
+      return;
+    }
+    if (px === lastObservedPx) return;
     lastObservedPx = px;
     ingestTicks(label, [px]);
     state.lastPx = String(px);
@@ -1973,11 +2019,11 @@ if (window.__quotexbotAbortInstalled) {
     }
   }
 
-  let axisObs = null;
-  let lastAxisEl = null;
   function bindAxisObserver() {
     const axis = readAxisLivePrice();
-    if (!axis || !axis.el || axis.el === lastAxisEl) return;
+    if (!axis || !axis.el) return;
+    const missing = !!(lastAxisEl && lastAxisEl.isConnected === false);
+    if (!missing && axis.el === lastAxisEl) return;
     lastAxisEl = axis.el;
     try { if (axisObs) axisObs.disconnect(); } catch (_e) {}
     try {
