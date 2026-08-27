@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "quotexbot",
+  "version": "0.9.12",
+  "description": "DEMO HUD on the open Quotex chart: visible-DOM price, journal, auto Up/Down. No cookies/SSID.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://market-qx.info/*",
+        "https://*.market-qx.info/*",
+        "http://market-qx.info/*",
+        "http://*.market-qx.info/*",
+        "https://market-qx.com/*",
+        "https://*.market-qx.com/*",
+        "https://broker-qx.com/*",
+        "https://*.broker-qx.com/*",
+        "https://broker-qx.info/*",
+        "https://*.broker-qx.info/*",
+        "https://qxbroker.com/*",
+        "https://*.qxbroker.com/*",
+        "https://quotex.com/*",
+        "https://*.quotex.com/*",
+        "https://quotex.app/*",
+        "https://*.quotex.app/*",
+        "https://market-qx.io/*",
+        "https://*.market-qx.io/*"
+      ],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
+}
