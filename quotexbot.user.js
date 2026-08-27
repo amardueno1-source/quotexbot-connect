@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.7
+// @version      0.9.8
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.7";
+  const FILE_VER = "0.9.8";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,8 +537,9 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.7",
+    version: "0.9.8",
     minWaitMs: 8000,
+    tradeMs: 60000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
@@ -657,6 +658,14 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   let lastClickAt = 0;
+  if (Array.isArray(state.journal)) {
+    for (let i = state.journal.length - 1; i >= 0; i--) {
+      if (state.journal[i] && state.journal[i].ok && state.journal[i].t) {
+        lastClickAt = state.journal[i].t;
+        break;
+      }
+    }
+  }
   let scanning = false;
   let browseIndex = 0;
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1255,32 +1264,193 @@ if (window.__quotexbotAbortInstalled) {
     const x = Number(n) || 0;
     return (x >= 0 ? "+" : "") + x.toFixed(2) + "$";
   }
+  const TF_MS = {
+    "5s": 5000, "10s": 10000, "15s": 15000, "30s": 30000,
+    "1m": 60000, "2m": 120000, "3m": 180000, "5m": 300000,
+    "10m": 600000, "15m": 900000, "30m": 1800000, "1h": 3600000,
+  };
+  function tfToMs(tf) {
+    const t = String(tf || "").toLowerCase().replace(/\s+/g, "");
+    if (TF_MS[t]) return TF_MS[t];
+    const m = t.match(/^(\d+)(s|m|h)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (m[2] === "s") return n * 1000;
+      if (m[2] === "m") return n * 60000;
+      if (m[2] === "h") return n * 3600000;
+    }
+    return CONFIG.tradeMs || 60000;
+  }
+  function clockToTf(v) {
+    const raw = String(v || "").replace(/\s+/g, "");
+    if (!raw) return null;
+    const low = raw.toLowerCase();
+    if (TF_MS[low]) return low;
+    let sec = null;
+    const hms = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+    if (hms) sec = (+hms[1]) * 3600 + (+hms[2]) * 60 + (+hms[3]);
+    const ms = !hms && raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (ms) sec = (+ms[1]) * 60 + (+ms[2]);
+    if (sec == null || !isFinite(sec) || sec <= 0) return null;
+    const keys = Object.keys(TF_MS);
+    for (let i = 0; i < keys.length; i++) {
+      if (TF_MS[keys[i]] === sec * 1000) return keys[i];
+    }
+    if (sec % 3600 === 0) return (sec / 3600) + "h";
+    if (sec % 60 === 0) return (sec / 60) + "m";
+    return sec + "s";
+  }
+  function readExpiryLabel() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const re = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
+    let best = null, bestScore = -1e9, bestSel = null, bestSelScore = -1e9;
+    const nodes = document.querySelectorAll("button, span, div, li, a, label, b");
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, "").trim(); } catch (_e) { continue; }
+      if (!re.test(t)) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+      if (!r || r.width < 4 || r.height < 4) continue;
+      let extra = 0;
+      try {
+        const cls = String(el.className || "");
+        const aria = (el.getAttribute && el.getAttribute("aria-selected")) || "";
+        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 300;
+        const par = el.parentElement;
+        if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 160;
+      } catch (_e3) {}
+      const wide = window.innerWidth || 1200;
+      const score = extra - r.top + (r.left > wide * 0.5 ? 80 : 0);
+      const lab = t.toLowerCase();
+      if (score > bestScore) { bestScore = score; best = lab; }
+      if (extra >= 160 && score > bestSelScore) { bestSelScore = score; bestSel = lab; }
+    }
+    if (bestSel && TF_MS[bestSel]) return bestSel;
+    try {
+      if (scrape && typeof scrape.findLabeledInput === "function") {
+        const el = scrape.findLabeledInput(document, /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i);
+        if (el) {
+          const v = (el.value != null ? el.value : "") || (el.textContent || "");
+          const mapped = clockToTf(v);
+          if (mapped) return mapped;
+        }
+      }
+    } catch (_e4) {}
+    try {
+      const snap = snapDoc();
+      const tf = snap && snap.timeframe ? String(snap.timeframe).toLowerCase() : "";
+      if (TF_MS[tf]) return tf;
+    } catch (_e0) {}
+    if (best && TF_MS[best]) return best;
+    return "1m";
+  }
+  function readExpiryMs() {
+    return tfToMs(readExpiryLabel());
+  }
+  function screenCountdownSec() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let bestMoney = null;
+    let bestZero = null;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("div, span, b, strong, p, label, text, tspan, em");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_e0) {}
+      });
+    } catch (_e1) {
+      try {
+        const list = document.querySelectorAll("div, span, b, strong, p, label");
+        for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+      } catch (_e2) {}
+    }
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      let t = "";
+      try { t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e3) { continue; }
+      if (!t || t.length > 32) continue;
+      if (/\b\d{2}:\d{2}:\d{2}\b/.test(t)) continue;
+      const m = t.match(/\b(\d{1,2}):(\d{2})\b/);
+      if (!m) continue;
+      const mm = parseInt(m[1], 10);
+      const ss = parseInt(m[2], 10);
+      if (!isFinite(mm) || !isFinite(ss) || ss > 59 || mm >= 15) continue;
+      const total = mm * 60 + ss;
+      const hasMoney = /\$|\d\s*\$/.test(t);
+      if (hasMoney) {
+        if (bestMoney == null || total < bestMoney) bestMoney = total;
+      } else if (mm === 0) {
+        if (bestZero == null || total < bestZero) bestZero = total;
+      }
+    }
+    if (bestMoney != null) return bestMoney;
+    if (bestZero != null) return bestZero;
+    return null;
+  }
+  function pnlAlreadyUsed(used, n) {
+    if (used[String(n)]) return true;
+    const keys = Object.keys(used);
+    for (let i = 0; i < keys.length; i++) {
+      if (Math.abs(Number(keys[i]) - n) < 1e-6) return true;
+    }
+    return false;
+  }
+  function lastOkJournal() {
+    const j = state.journal || [];
+    for (let i = j.length - 1; i >= 0; i--) {
+      if (j[i] && j[i].ok) return j[i];
+    }
+    return null;
+  }
   function settlePendingJournal() {
     if (!Array.isArray(state.journal) || !state.journal.length) return;
     const now = Date.now();
-    const minW = CONFIG.minWaitMs || 8000;
-    const pending = [];
+    let cd = null;
+    try { cd = screenCountdownSec(); } catch (_e) {}
+    const countingDown = cd != null && cd > 1;
+    const used = {};
+    for (let i = 0; i < state.journal.length; i++) {
+      const r = state.journal[i];
+      if (r && r.result && r.pnl != null) used[String(r.pnl)] = 1;
+    }
+    let fpNow = "";
+    try { fpNow = tradesFingerprint(); } catch (_fp) {}
+    const snips = countingDown ? [] : listPnlSnippets();
+    let changed = false;
     for (let i = 0; i < state.journal.length; i++) {
       const row = state.journal[i];
-      if (row && row.ok && !row.result && now - (row.t || 0) >= minW) pending.push(row);
-    }
-    if (!pending.length) return;
-    const snips = listPnlSnippets();
-    let changed = false;
-    const n = Math.min(pending.length, snips.length);
-    for (let k = 0; k < n; k++) {
-      const row = pending[pending.length - 1 - k];
-      const got = snips[k];
-      if (!row || row.result) continue;
-      row.result = got.win ? "win" : "loss";
-      row.pnl = got.pnl;
-      changed = true;
-      log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || ""));
-    }
-    for (let i = 0; i < pending.length; i++) {
-      const row = pending[i];
-      if (row.result) continue;
-      if (now - (row.t || 0) >= 90000) {
+      if (!(row && row.ok && !row.result)) continue;
+      const dur = row.durMs || CONFIG.tradeMs || 60000;
+      const age = now - (row.t || 0);
+      if (age < dur) continue;
+      if (countingDown) continue;
+      const samePanel = !!(row.fp && fpNow && fpNow === row.fp);
+      if (!samePanel) {
+        let got = null;
+        for (let k = 0; k < snips.length; k++) {
+          if (pnlAlreadyUsed(used, snips[k].pnl)) continue;
+          got = snips[k];
+          break;
+        }
+        if (got) {
+          row.result = got.win ? "win" : "loss";
+          row.pnl = got.pnl;
+          used[String(got.pnl)] = 1;
+          changed = true;
+          log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
+          continue;
+        }
+      }
+      if (age >= dur + 45000) {
         row.result = "loss";
         row.pnl = 0;
         changed = true;
@@ -1313,18 +1483,20 @@ if (window.__quotexbotAbortInstalled) {
 
   function tradeOpen() {
     if (!lastClickAt) return false;
-    const age = Date.now() - lastClickAt;
-    const minW = CONFIG.minWaitMs || 8000;
-    if (age < minW) return true;
-    if (age >= CONFIG.cooldownMs) return false;
-    try {
-      const fp = tradesFingerprint();
-      if (lastTradesFp && fp && fp !== lastTradesFp) {
-        settlePendingJournal();
-        return false;
-      }
-    } catch (_e) {}
-    return true;
+    const now = Date.now();
+    const age = now - lastClickAt;
+    const last = lastOkJournal();
+    const dur = (last && last.durMs) || CONFIG.tradeMs || 60000;
+    if (last && !last.result) {
+      let cd = null;
+      try { cd = screenCountdownSec(); } catch (_e) {}
+      if (cd != null && cd > 1) return true;
+      if (age < dur) return true;
+      try { settlePendingJournal(); } catch (_e2) {}
+      if (!last.result && age < dur + 15000) return true;
+    }
+    if (age < (CONFIG.cooldownMs || 65000)) return true;
+    return false;
   }
 
   function snapDoc() {
@@ -1424,20 +1596,31 @@ if (window.__quotexbotAbortInstalled) {
       if (Date.now() - lastClickAt < CONFIG.cooldownMs) return;
 
       await sleep(400 + Math.floor(Math.random() * 600));
+      let durLabel = "1m";
+      let durMsVal = CONFIG.tradeMs || 60000;
+      try { durLabel = readExpiryLabel(); } catch (_d1) {}
+      try { durMsVal = readExpiryMs(); } catch (_d2) { durMsVal = tfToMs(durLabel); }
       const r = clickDir(d.signal === "PUT" ? "down" : "up");
+      let fpAtClick = "";
+      try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
       addJournal({
         t: Date.now(),
         pair: p.label,
         signal: d.signal,
+        pos: d.signal,
+        dur: durLabel,
+        durMs: durMsVal,
         px: lastPx != null ? String(lastPx) : "—",
+        fp: fpAtClick,
         ok: Boolean(r.ok),
         err: r.ok ? "" : (r.error || "fail"),
       });
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();
-        try { lastTradesFp = tradesFingerprint(); } catch (_fp) { lastTradesFp = ""; }
-        state.lastReason = d.signal + " " + p.label + " · " + d.reason; log("ক্লিক OK: " + d.signal + " " + p.label);
+        lastTradesFp = fpAtClick;
+        state.lastReason = d.signal + " " + p.label + " · " + durLabel + " · " + d.reason;
+        log("ক্লিক OK: " + d.signal + " " + p.label + " · " + durLabel + " · দাম " + (lastPx != null ? lastPx : "—"));
       } else {
         state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
       }
@@ -1667,9 +1850,11 @@ if (window.__quotexbotAbortInstalled) {
       else if (j.result === "loss") { res = "লস " + fmtMoney(j.pnl); rcls = "put"; }
       else if (j.ok) res = "চলছে";
       else res = esc(j.err || "FAIL");
-      return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td class=\"" + rcls + "\">" + res + "</td></tr>";
-    }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>মোট ট্রেড<b>" + ts.total + "</b></div><div class=\"win\">প্রফিট<b>" + ts.wins + "</b></div><div class=\"lose\">লস<b>" + ts.losses + "</b></div><div>নেট<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">ফলাফল অপেক্ষা: " + ts.pending + "</p>" : "") + "<h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ফলাফল</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+      const pos = j.pos || j.signal || "—";
+      const dur = j.dur || "—";
+      return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(pos) + "</td><td>" + esc(dur) + "</td><td>" + esc(j.px) + "</td><td class=\"" + rcls + "\">" + res + "</td></tr>";
+    }).join("") || "<tr><td colspan=\"6\">এখনো ট্রেড নেই</td></tr>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>মোট ট্রেড<b>" + ts.total + "</b></div><div class=\"win\">প্রফিট<b>" + ts.wins + "</b></div><div class=\"lose\">লস<b>" + ts.losses + "</b></div><div>নেট<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">ফলাফল অপেক্ষা: " + ts.pending + "</p>" : "") + "<h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>পজিশন</th><th>সময়</th><th>দাম</th><th>ফলাফল</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
     mountGrip(dash, "dash");
   }
 
@@ -1697,6 +1882,7 @@ if (window.__quotexbotAbortInstalled) {
         <div class="row"><span>OTC দাম</span><b>${state.lastPx || "—"}</b></div>
         <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} বার · সেভ</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
+        <div class="row"><span>ট্রেড</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + (j.dur ? " · " + j.dur : "") + (j.result ? "" : " · চলছে"); })()}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="row"><span>হিসাব</span><b>${(function(){ const s = tradeStats(); return s.total + " ট্রেড · প্রফিট " + s.wins + " · লস " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="btns">
