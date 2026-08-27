@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.5
+// @version      0.9.6
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.5";
+  const FILE_VER = "0.9.6";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.5",
+    version: "0.9.6",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -1195,12 +1195,21 @@ if (window.__quotexbotAbortInstalled) {
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
       if (!t || t.length > 24) continue;
+      if (!/[+$\u0024]|0\.00/.test(t)) continue;
       const got = parsePnlText(t);
       if (!got) continue;
       found.push({ y: r.top, win: got.win, pnl: got.pnl, t: t });
     }
     found.sort(function (a, b) { return a.y - b.y; });
-    return found;
+    const uniq = [];
+    const seen = {};
+    for (let i = 0; i < found.length; i++) {
+      const k = found[i].win + ":" + found[i].pnl + ":" + Math.round(found[i].y / 8);
+      if (seen[k]) continue;
+      seen[k] = 1;
+      uniq.push(found[i]);
+    }
+    return uniq;
   }
   function tradeStats() {
     const j = state.journal || [];
@@ -1220,22 +1229,37 @@ if (window.__quotexbotAbortInstalled) {
   }
   function settlePendingJournal() {
     if (!Array.isArray(state.journal) || !state.journal.length) return;
-    const last = state.journal[state.journal.length - 1];
-    if (!last || !last.ok || last.result) return;
-    const age = Date.now() - (last.t || 0);
-    if (age < (CONFIG.minWaitMs || 8000)) return;
-    let fp = "";
-    try { fp = tradesFingerprint(); } catch (_e) {}
-    const closed = (lastTradesFp && fp && fp !== lastTradesFp) || age >= CONFIG.cooldownMs;
-    if (!closed) return;
+    const now = Date.now();
+    const minW = CONFIG.minWaitMs || 8000;
+    const pending = [];
+    for (let i = 0; i < state.journal.length; i++) {
+      const row = state.journal[i];
+      if (row && row.ok && !row.result && now - (row.t || 0) >= minW) pending.push(row);
+    }
+    if (!pending.length) return;
     const snips = listPnlSnippets();
-    if (!snips.length) return;
-    const got = snips[0];
-    last.result = got.win ? "win" : "loss";
-    last.pnl = got.pnl;
-    lastTradesFp = fp || lastTradesFp;
-    log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (last.pair || ""));
-    saveState(state);
+    let changed = false;
+    const n = Math.min(pending.length, snips.length);
+    for (let k = 0; k < n; k++) {
+      const row = pending[pending.length - 1 - k];
+      const got = snips[k];
+      if (!row || row.result) continue;
+      row.result = got.win ? "win" : "loss";
+      row.pnl = got.pnl;
+      changed = true;
+      log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || ""));
+    }
+    for (let i = 0; i < pending.length; i++) {
+      const row = pending[i];
+      if (row.result) continue;
+      if (now - (row.t || 0) >= 90000) {
+        row.result = "loss";
+        row.pnl = 0;
+        changed = true;
+        log("লস +0.00$ · " + (row.pair || ""));
+      }
+    }
+    if (changed) saveState(state);
   }
   function tradesFingerprint() {
     const hud = document.getElementById("quotexbot-hud");
