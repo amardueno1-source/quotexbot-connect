@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.33
+// @version      0.9.34
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.33",
+    version: "0.9.34",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1339,39 +1339,151 @@ if (window.__quotexbotAbortInstalled) {
     return m ? (m[1].toUpperCase() + "/" + m[2].toUpperCase()) : null;
   }
 
+  function inLeftoverTooltip(el) {
+    if (!el) return false;
+    let cur = el;
+    for (let d = 0; d < 6 && cur && cur !== document.body && cur !== document.documentElement; d++) {
+      try {
+        const role = (cur.getAttribute && (cur.getAttribute("role") || "")) || "";
+        if (/tooltip/i.test(role)) return true;
+        const cls = String(cur.className || "") + " " + String(cur.id || "");
+        if (/\b(tooltip|tippy|popper|popover|hint|float-label|chart-tooltip)\b/i.test(cls)) return true;
+      } catch (_e) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function inTradesHistory(el) {
+    if (!el) return false;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    if (hud && (el === hud || hud.contains(el))) return false;
+    if (dashEl && (el === dashEl || dashEl.contains(el))) return false;
+    const wide = window.innerWidth || 1200;
+    const high = window.innerHeight || 800;
+    const headRe = /\b(trades|trade history|opened|closed|history|deals)\b/i;
+    const clsRe = /\b(trades?|deals?|history|orders?|positions?)\b/i;
+    let cur = el;
+    for (let d = 0; d < 8 && cur && cur !== document.body && cur !== document.documentElement; d++) {
+      try {
+        const cls = String(cur.className || "") + " " + String(cur.id || "");
+        let t = "";
+        try { t = String(cur.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { t = ""; }
+        let r = null;
+        try { r = cur.getBoundingClientRect(); } catch (_eR) {}
+        if (r && r.width >= 80 && r.height >= 70 && r.height <= high * 0.72 && r.width <= wide * 0.5) {
+          const pairs = t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g);
+          const nPairs = pairs ? pairs.length : 0;
+          if (nPairs >= 2) return true;
+          if (headRe.test(t.slice(0, 220)) && nPairs >= 1) return true;
+          if (clsRe.test(cls) && (r.left < wide * 0.4 || r.top > high * 0.55) && nPairs >= 1) return true;
+        }
+      } catch (_e0) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function pairChipText(t) {
+    const s = String(t || "");
+    if (!/[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}/.test(s)) return false;
+    if (/[+$]|\$\s*\d|\d+\.\d+\s*\$|[+\u2212\-]\s*\$?\d/.test(s)) return true;
+    if (/\b(win|loss|won|lost|profit|payout|closed)\b/i.test(s)) return true;
+    if (/\b(call|put)\b/i.test(s) && /\$|\d/.test(s)) return true;
+    return false;
+  }
+
+  /* Open chart pair only: header / right trade panel.
+     Ignore Trades/history, leftover tooltips, old trade chips. */
   function visiblePair() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
-    const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p");
-    let best = null, bestScore = -1e9;
-    const nMax = Math.min(nodes.length, SCAN_MAX);
+    const wide = window.innerWidth || 1200;
+    const high = window.innerHeight || 800;
+    const titleRe = /^[A-Z]{3}\s*\/\s*[A-Z]{3}(?:\s*\(?\s*OTC\s*\)?)?$/i;
+    const header = [];
+    const right = [];
+    const locked = lastSeenPair || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "");
+    const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p, label");
+    const nMax = Math.min(nodes.length, SCAN_MAX * 2);
     for (let n = 0; n < nMax; n++) {
       const el = nodes[n];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      if (inTradesHistory(el) || inLeftoverTooltip(el)) continue;
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { continue; }
       if (!t || t.length > 48) continue;
-      const lab = labelFromText(t);
+      if (t.indexOf("/") < 0 && t.toUpperCase().indexOf("OTC") < 0) continue;
+      if (pairChipText(t)) continue;
+      const tClean = t.replace(/[▼▲▾▴⌄^]/g, "").replace(/\s+/g, " ").trim();
+      const lab = labelFromText(tClean);
       if (!lab) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
       if (!r || r.width < 4 || r.height < 4) continue;
+      if (r.top < 0 || r.left < 0 || r.top > high || r.left > wide) continue;
       let font = 12;
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
+      const exact = titleRe.test(tClean);
       let extra = 0;
       try {
         const cls = String(el.className || "");
         const aria = (el.getAttribute && el.getAttribute("aria-selected")) || "";
-        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 400;
+        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 200;
         const par = el.parentElement;
-        if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 140;
-        if (r.top < 140 && r.left < (window.innerWidth || 1200) * 0.55) extra += 500;
+        if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 80;
       } catch (_e4) {}
-      const score = font * 8 - r.top + (t.length < 18 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0) + extra;
-      if (score > bestScore) { bestScore = score; best = lab; }
+      if (exact) extra += 260;
+      if (/OTC/i.test(tClean)) extra += 50;
+      if (tClean.length < 18) extra += 40;
+      const score = font * 8 - r.top + extra;
+      const inHeaderBand = r.top < 140 && r.left > 8 && r.left < wide * 0.62 && r.height < 64;
+      const inRightPanel = r.left > wide * 0.55 && r.top > 8 && r.top < high * 0.72;
+      const inChartBody = r.top >= 140 && r.left < wide * 0.52 && r.left > 8 && !inRightPanel;
+      if (inChartBody) continue;
+      if (inHeaderBand) header.push({ lab: lab, score: score + 500, r: r, exact: exact });
+      else if (inRightPanel) right.push({ lab: lab, score: score + 180, r: r, exact: exact });
     }
-    if (best) return best;
+    function pick(list) {
+      let best = null, bestScore = -1e9;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].score > bestScore) { bestScore = list[i].score; best = list[i]; }
+      }
+      return best;
+    }
+    function hasLab(list, lab) {
+      const k = fxPairKey(lab);
+      if (!k) return false;
+      for (let i = 0; i < list.length; i++) {
+        if (fxPairKey(list[i].lab) === k) return true;
+      }
+      return false;
+    }
+    function titleRowOf(list) {
+      if (!list.length) return [];
+      let top = 1e9;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].r.top < top) top = list[i].r.top;
+      }
+      const row = [];
+      for (let i = 0; i < list.length; i++) {
+        if (Math.abs(list[i].r.top - top) <= 42) row.push(list[i]);
+      }
+      return row;
+    }
+    const titleRow = titleRowOf(header);
+    const bestHeader = pick(titleRow) || pick(header);
+    const bestRight = pick(right);
+    if (locked) {
+      if (hasLab(titleRow, locked) || hasLab(header, locked) || hasLab(right, locked)) return locked;
+      if (bestHeader && fxPairKey(bestHeader.lab) !== fxPairKey(locked)) return bestHeader.lab;
+      if (bestRight && fxPairKey(bestRight.lab) !== fxPairKey(locked)) return bestRight.lab;
+      return locked;
+    }
+    if (bestHeader) return bestHeader.lab;
+    if (bestRight) return bestRight.lab;
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
     if (fromSnap) return fromSnap;
@@ -1841,6 +1953,7 @@ if (window.__quotexbotAbortInstalled) {
           row.pnl = got.pnl;
           used[String(got.pnl)] = 1;
           changed = true;
+          try { notePair(row.pair, { lastResult: row.result, lastPnl: row.pnl }); } catch (_np) {}
           log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
           continue;
         }
@@ -1849,6 +1962,7 @@ if (window.__quotexbotAbortInstalled) {
         row.result = "loss";
         row.pnl = 0;
         changed = true;
+        try { notePair(row.pair, { lastResult: "loss", lastPnl: 0 }); } catch (_np2) {}
         log("লস +0.00$ · " + (row.pair || ""));
       }
     }
@@ -1897,6 +2011,38 @@ if (window.__quotexbotAbortInstalled) {
   function snapDoc() {
     if (!scrape || typeof scrape.scrapeDocument !== "function") return { accountMode: "", asset: "" };
     try { return scrape.scrapeDocument(document); } catch (_e) { return { accountMode: "", asset: "" }; }
+  }
+  function journalManual(dir, r) {
+    if (!r || !r.ok) return;
+    const pos = dir === "down" ? "PUT" : "CALL";
+    const pair = lastSeenPair || visiblePair() || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "") || "—";
+    let durLabel = "1m";
+    let durMsVal = CONFIG.tradeMs || 60000;
+    try { durLabel = readExpiryLabel(); } catch (_d1) {}
+    try { durMsVal = readExpiryMs(); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+    let fpAtClick = "";
+    try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
+    const px = state.lastPx != null && state.lastPx !== "" ? String(state.lastPx) : "—";
+    addJournal({
+      t: Date.now(),
+      pair: pair,
+      signal: pos,
+      pos: pos,
+      dur: durLabel,
+      durMs: durMsVal,
+      px: px,
+      fp: fpAtClick,
+      ok: true,
+      err: "",
+    });
+    lastClickAt = Date.now();
+    lastTradesFp = fpAtClick;
+    notePair(pair, {
+      px: px,
+      signal: pos,
+      reason: "Manual " + pos,
+      bars: barCount(pair),
+    });
   }
   function clickDir(dir) {
     if (!scrape) return { ok: false, error: "scrape missing" };
@@ -2344,12 +2490,26 @@ if (window.__quotexbotAbortInstalled) {
     if (act === "dash") { state.dashOpen = !state.dashOpen; saveState(state); renderDash(); }
     if (act === "up") {
       const r = clickDir("up");
-      state.lastReason = r.ok ? "উপরে clicked" : (r.error || "fail"); log(r.ok ? "ম্যানুয়াল উপরে OK" : "ম্যানুয়াল উপরে FAIL: " + (r.error || ""));
+      if (r.ok) {
+        journalManual("up", r);
+        state.lastReason = "উপরে clicked";
+        log("ম্যানুয়াল উপরে OK");
+      } else {
+        state.lastReason = r.error || "fail";
+        log("ম্যানুয়াল উপরে FAIL: " + (r.error || ""));
+      }
       saveState(state); render();
     }
     if (act === "down") {
       const r = clickDir("down");
-      state.lastReason = r.ok ? "নিচে clicked" : (r.error || ""); log(r.ok ? "ম্যানুয়াল নিচে OK" : "ম্যানুয়াল নিচে FAIL: " + (r.error || ""));
+      if (r.ok) {
+        journalManual("down", r);
+        state.lastReason = "নিচে clicked";
+        log("ম্যানুয়াল নিচে OK");
+      } else {
+        state.lastReason = r.error || "";
+        log("ম্যানুয়াল নিচে FAIL: " + (r.error || ""));
+      }
       saveState(state); render();
     }
     if (act === "auto") {
