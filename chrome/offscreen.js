@@ -1,10 +1,11 @@
 /**
- * quotexbot offscreen OCR host (v0.9.42-ext)
+ * quotexbot offscreen OCR host (v0.9.43-ext)
  *
  * Tesseract.js wasm cannot run in the MV3 service worker. This hidden
  * extension page loads the vendored worker + wasm + eng.traineddata and
- * OCRs the SMALL blue live-tag crop plus the last-candle trade-bubble
- * crop (MM:SS next to $). Never injected into Quotex.
+ * OCRs ONLY the tiny cyan/blue last-price PILL (chart-canvas right-edge
+ * blob, upscaled ~3×) plus the last-candle trade-bubble crop (MM:SS next
+ * to $). Never Tesseract the whole axis/sidebar. Never injected into Quotex.
  */
 "use strict";
 

@@ -1,8 +1,9 @@
 /**
- * Chart-axis live-tag crop helper (v0.9.40-ext).
- * Crops the canvas-right blue/cyan live-price blob and upscales 3x.
- * Primary OCR is Tesseract.js in the offscreen document — this file is
- * NOT the recognizer. Homemade glyph matching is kept but unused.
+ * Chart-axis live-tag crop helper (v0.9.43-ext).
+ * After captureVisibleTab: crop the chart-canvas RIGHT EDGE, find the
+ * cyan/blue last-price PILL, upscale ~3x. Tesseract (offscreen) OCRs only
+ * that tiny pill — never the whole axis/sidebar. Homemade glyph matching
+ * is kept but unused.
  */
 (function (root) {
   "use strict";
@@ -564,20 +565,22 @@
     return readPriceFromImageData(img, opts);
   }
 
-  function cropChartAxisStrip(img, rect, dpr) {
+  function cropChartAxisStrip(img, rect, dpr, padLeft, padRight, padY) {
     if (!img || !rect) return null;
     var left = Number(rect.left), top = Number(rect.top);
     var width = Number(rect.width), height = Number(rect.height);
     if (!isFinite(left) || !isFinite(top) || !isFinite(width) || !isFinite(height)) return null;
     var right = left + width;
     var bottom = top + height;
+    padLeft = padLeft == null ? 90 : padLeft;
+    padRight = padRight == null ? 24 : padRight;
+    padY = padY == null ? 20 : padY;
     /* Chart live tag sits at canvas right edge, ~250–320px left of window right.
-       Strip: rect.right-90 .. rect.right+24, rect.top+20 .. rect.bottom-20.
-       Never crop the window-right 110px sidebar. */
-    var x0 = Math.round((right - 90) * dpr);
-    var x1 = Math.round((right + 24) * dpr);
-    var y0 = Math.round((top + 20) * dpr);
-    var y1 = Math.round((bottom - 20) * dpr);
+       Strip: rect.right-padLeft .. rect.right+padRight. Never the sidebar. */
+    var x0 = Math.round((right - padLeft) * dpr);
+    var x1 = Math.round((right + padRight) * dpr);
+    var y0 = Math.round((top + padY) * dpr);
+    var y1 = Math.round((bottom - padY) * dpr);
     x0 = clamp(x0, 0, img.width);
     x1 = clamp(x1, 0, img.width);
     y0 = clamp(y0, 0, img.height);
@@ -633,10 +636,7 @@
     return out;
   }
 
-  function cropLiveTagImageData(img, opts) {
-    opts = opts || {};
-    var dpr = opts.dpr > 0 ? opts.dpr : 1;
-    var strip = cropChartAxisStrip(img, opts.rect, dpr);
+  function pillFromStrip(strip, dpr) {
     if (!strip) return null;
     var blobs = pickTagBlobs(findBlueBlobs(strip), dpr, strip.height);
     if (!blobs.length) return null;
@@ -651,9 +651,29 @@
       blob.h + padY * 2
     );
     if (!crop) return null;
-    var up = scaleNearest(crop, 3);
+    /* OCR only this tiny cyan/blue pill, never the fat axis strip. ~3× (4× if tiny). */
+    var scale = crop.height < 36 ? 4 : 3;
+    var up = scaleNearest(crop, scale);
     invertTagToBw(up);
     return padWhite(up, 10);
+  }
+
+  function cropLiveTagImageData(img, opts) {
+    opts = opts || {};
+    var dpr = opts.dpr > 0 ? opts.dpr : 1;
+    /* Right-edge strips of the chart canvas, then blob-pick the live-price pill. */
+    var tries = [
+      [90, 24, 20],
+      [120, 10, 8],
+      [70, 36, 12]
+    ];
+    var i;
+    for (i = 0; i < tries.length; i++) {
+      var t = tries[i];
+      var pill = pillFromStrip(cropChartAxisStrip(img, opts.rect, dpr, t[0], t[1], t[2]), dpr);
+      if (pill) return pill;
+    }
+    return null;
   }
 
   async function cropLiveTagFromPngDataUrl(dataUrl, opts) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.42
+// @version      0.9.43
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -600,7 +600,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.42",
+    version: "0.9.43",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -688,7 +688,11 @@ if (window.__quotexbotAbortInstalled) {
     try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_e2) { return {}; }
   }
   function saveState(st) {
-    const json = JSON.stringify(st);
+    const payload = Object.assign({}, st, { auto: false });
+    if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(payload.lastReason || ""))) {
+      payload.lastReason = "";
+    }
+    const json = JSON.stringify(payload);
     try { if (typeof GM_setValue === "function") GM_setValue(KEY, json); } catch (_e) {}
     try { localStorage.setItem(KEY, json); } catch (_e2) {}
   }
@@ -727,6 +731,11 @@ if (window.__quotexbotAbortInstalled) {
   }
   /* Never restore Auto ON from localStorage. User must press Start auto. */
   state.auto = false;
+  try {
+    if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(state.lastReason || ""))) {
+      state.lastReason = "";
+    }
+  } catch (_eRboot) {}
   try { saveState(state); } catch (_eAuto) {}
 
   function log(msg) {

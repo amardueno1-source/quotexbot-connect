@@ -1,13 +1,16 @@
 /**
- * quotexbot MV3 service worker (v0.9.42-ext)
+ * quotexbot MV3 service worker (v0.9.43-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
  *   chrome.tabs.captureVisibleTab → send PNG + chart-canvas rect to the
- *   offscreen document, which crops the SMALL blue/cyan live-price tag
- *   (canvas right −90/+24) and the last-candle trade-bubble (MM:SS + $).
- *   Tesseract.js. Wasm cannot run here; OCR is never injected into Quotex.
+ *   offscreen document, which crops the chart-canvas RIGHT EDGE, finds the
+ *   cyan/blue last-price PILL, and OCRs only that tiny crop (~3×) plus the
+ *   last-candle trade-bubble (MM:SS + $). Wasm cannot run here; OCR is
+ *   never injected into Quotex.
  *
- * Visible pixels only. No websocket/HTTP reverse-engineering.
+ * One capture at a time (inflight). Content self-schedules ~1500ms after
+ * the previous capture+OCR returns. Visible pixels only. No websocket/HTTP
+ * reverse-engineering.
  */
 "use strict";
 
@@ -46,7 +49,9 @@ function parseRect(r) {
 function runCapture(windowId, dpr, rect, needCd) {
   var now = Date.now();
   if (inflight) return inflight;
-  if (lastPack.resp && now - lastPack.at < 700) {
+  /* Do not reuse a 700ms-old pack: Auto needs OCR age <2s and the content
+     loop already waits for the previous shot. Coalesce only true overlap. */
+  if (lastPack.resp && now - lastPack.at < 250) {
     return Promise.resolve(lastPack.resp);
   }
   inflight = captureOcr(windowId, dpr, rect, needCd)

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "quotexbot",
-  "version": "0.9.42",
-  "description": "DEMO HUD on the open Quotex chart: Tesseract OCR of the visible chart-axis live tag. No cookies/SSID.",
+  "version": "0.9.43",
+  "description": "DEMO HUD on the open Quotex chart: Tesseract OCR of the cyan last-price pill. No cookies/SSID.",
   "background": {
     "service_worker": "background.js"
   },

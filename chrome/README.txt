@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.42
+quotexbot Chrome MV3 extension  v0.9.43
 =======================================
 
 Load unpacked
@@ -14,5 +14,11 @@ The HUD is English. Pair names, CALL/PUT, and DEMO stay as-is.
 
 DEMO only. Visible DOM. No cookies / SSID / unofficial APIs.
 Stay on the open chart. Auto clicks Up/Down on DEMO only.
-Live price: screenshot the visible chart-axis tag, crop the SMALL blue
-live-tag blob, Tesseract.js OCR (offscreen, not on the Quotex page).
+Auto ON only from a trusted Start auto click this session.
+
+Live price: if div.XfvzC "Pair Information" is open, read Price Now and skip
+the screenshot. Never click that heading. If closed, click only
+svg.icon-pair-information on the right-panel active pair (not the pair name).
+If that opens the asset list, close it and do not retry. Else screenshot,
+crop the chart-canvas right-edge cyan/blue last-price pill (~3x), Tesseract.js
+OCR offscreen. Capture waits for the previous OCR, then ~1500ms.

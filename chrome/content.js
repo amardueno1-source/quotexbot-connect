@@ -1,16 +1,22 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.42-ext)
+ * quotexbot Chrome MV3 content script (v0.9.43-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
- * Live price: screenshot the visible DEMO tab, crop the CHART-AXIS blue
- * last-price tag (right edge of the largest visible canvas, left of the
- * trade sidebar — not the window-right 110px). Open-trade 00:05 is OCRd
- * from the last-candle $ bubble (left of the live-price tag). Tesseract.js
- * OCRs those SMALL crops in an offscreen document. Hit-test is fallback.
- * Never click (i), pair name, or PAIR INFORMATION.
- * Price Now is used only if that popup is already open.
+ * Live price: if div.XfvzC "Pair Information" is already open, read Price Now
+ * from the popup DOM and skip the screenshot. Never click that heading.
+ * When the popup is closed, click ONLY svg.icon-pair-information (or its
+ * nearest small button) on the RIGHT trade panel next to the ACTIVE pair.
+ * Never click the pair name, header tabs, asset list, search, leftover chips,
+ * or the words Pair Information. If that click opens the asset list, close it
+ * and do not retry — fall back to cyan-pill OCR. At most one (i) click / 8s.
+ * Fallback: screenshot, crop the chart-canvas RIGHT EDGE cyan/blue last-price
+ * PILL, Tesseract.js OCR only that tiny crop (~3×) offscreen.
+ * Capture self-schedules: wait until the previous capture+OCR returns, then
+ * wait the remainder of ~1500ms. Do not queue captureVisibleTab while busy.
+ * HUD may hold lastGoodPx 15s (no dash flash). Auto still requires a live
+ * quote (OCR or Price Now) younger than 2s.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -544,7 +550,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.42-ext",
+    version: "0.9.43-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -555,6 +561,7 @@
     sampleTicks: 16,
     sampleMs: 250,
     recordMs: 800,
+    captureMs: 1500,
     uiMs: 4000,
     minBarsForEma: 21,
     emaFast: 8,
@@ -616,6 +623,7 @@
   let lastPairInfoClickAt = 0;
   let lastPairInfoClickPair = "";
   let lastAssetListDismissAt = 0;
+  let pairInfoClickBanned = false;
   let lastAxisScanN = 0;
   let lastHudSig = "";
   let topHudYielded = false;
@@ -630,6 +638,7 @@
   let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
+  let captureWaiters = [];
   let otcMissLogged = false;
   let mmIdleBusy = false;
   let lastMmSetLogStake = null;
@@ -639,7 +648,13 @@
     try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_e) { return {}; }
   }
   function saveState(st) {
-    try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (_e) {}
+    try {
+      const payload = Object.assign({}, st, { auto: false });
+      if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(payload.lastReason || ""))) {
+        payload.lastReason = "";
+      }
+      localStorage.setItem(KEY, JSON.stringify(payload));
+    } catch (_e) {}
   }
 
     let state = Object.assign({
@@ -682,6 +697,12 @@
   lastGoodPxAt = 0;
   /* Never restore Auto ON from localStorage. User must press Start auto. */
   state.auto = false;
+  /* Persist lastReason "wait 56s" must not survive reload. */
+  try {
+    if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(state.lastReason || ""))) {
+      state.lastReason = "";
+    }
+  } catch (_eRboot) {}
   try { saveState(state); } catch (_eAuto) {}
 
   function log(msg) {
@@ -721,7 +742,7 @@
   let durationEnsuredOnce = false;
   let scanning = false;
   try {
-    if (state.lastReason && /trade open|cooldown|wait \d+\s*s/i.test(String(state.lastReason))) {
+    if (state.lastReason && /trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(state.lastReason))) {
       state.lastReason = "";
     }
   } catch (_eR0) {}
@@ -1525,9 +1546,10 @@
       (pairRect && rectsOverlap(hr, pairRect, 16)) ||
       (infoRect && rectsOverlap(hr, infoRect, 16));
     if (!hit) return false;
-    hud.style.right = "12px";
+    /* Bottom-left: do not cover the right-panel (i) icon. */
+    hud.style.left = "12px";
     hud.style.bottom = "12px";
-    hud.style.left = "auto";
+    hud.style.right = "auto";
     hud.style.top = "auto";
     try { saveWin(hud, "hud"); } catch (_e2) {}
     return true;
@@ -1604,10 +1626,227 @@
     } catch (_e1) {}
   }
 
+  function isPairInfoHeadingEl(el) {
+    if (!el) return false;
+    try {
+      const cls = String(el.className || "");
+      if (/(^|\s)XfvzC(\s|$)/.test(cls)) return true;
+      const t = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      if (/^pair\s*information$/i.test(t) && t.length < 40) return true;
+    } catch (_e) {}
+    return false;
+  }
+
+  function pairInfoPopupOpen() {
+    let open = false;
+    function scan(root) {
+      if (open || !root || !root.querySelectorAll) return;
+      try {
+        const byClass = root.querySelectorAll("div.XfvzC, .XfvzC");
+        for (let i = 0; i < byClass.length; i++) {
+          const el = byClass[i];
+          if (skipHudDashEl(el)) continue;
+          if (!isVisibleNode(el)) continue;
+          const t = String(el.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.length <= 80 && /pair\s*information/i.test(t)) { open = true; return; }
+          if (t && t.length < 40) { open = true; return; }
+        }
+      } catch (_e0) {}
+      try {
+        const list = root.querySelectorAll("div, h1, h2, h3, h4, span");
+        const nMax = Math.min(list.length, 400);
+        for (let i = 0; i < nMax; i++) {
+          const el = list[i];
+          if (skipHudDashEl(el)) continue;
+          let t = "";
+          try { t = String(el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+          if (!/^pair\s*information$/i.test(t)) continue;
+          if (!isVisibleNode(el)) continue;
+          open = true;
+          return;
+        }
+      } catch (_e1) {}
+    }
+    forEachRoot(scan);
+    try {
+      const extra = largeSameOriginChartDocs();
+      for (let i = 0; i < extra.length; i++) scan(extra[i]);
+    } catch (_e2) {}
+    return open;
+  }
+
+  function pairInfoUseHref(useEl) {
+    if (!useEl) return "";
+    let href = "";
+    try { href += " " + (useEl.getAttribute("href") || ""); } catch (_e0) {}
+    try { href += " " + (useEl.getAttribute("xlink:href") || ""); } catch (_e1) {}
+    try { href += " " + (useEl.getAttributeNS("http://www.w3.org/1999/xlink", "href") || ""); } catch (_e2) {}
+    return href;
+  }
+
+  function clickablePairInfoParent(el) {
+    let n = el;
+    for (let i = 0; i < 5 && n; i++) {
+      const tag = String(n.tagName || "").toUpperCase();
+      const role = (n.getAttribute && n.getAttribute("role")) || "";
+      let r = null;
+      try { r = n.getBoundingClientRect(); } catch (_eR) {}
+      const small = !!(r && r.width <= 48 && r.height <= 48);
+      if ((tag === "BUTTON" || tag === "A" || role === "button") && small) return n;
+      let t = "";
+      try { t = String(n.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) {}
+      if (t && /[A-Z]{3}\s*\/\s*[A-Z]{3}/i.test(t) && t.length > 8) return el;
+      if (isPairInfoHeadingEl(n)) return el;
+      if (r && (r.width > 80 || r.height > 64)) return el;
+      n = n.parentElement;
+    }
+    return el;
+  }
+
+  function collectPairInfoIcons() {
+    const found = [];
+    const seen = [];
+    function consider(svg) {
+      if (!svg) return;
+      if (seen.indexOf(svg) >= 0) return;
+      seen.push(svg);
+      if (skipHudDashEl(svg)) return;
+      if (inMarketList(svg) || inAssetListOverlay(svg)) return;
+      const clickEl = clickablePairInfoParent(svg);
+      if (!clickEl) return;
+      if (isPairInfoHeadingEl(clickEl) || isPairInfoHeadingEl(svg)) return;
+      if (skipHudDashEl(clickEl) || inMarketList(clickEl) || inAssetListOverlay(clickEl)) return;
+      let own = "";
+      try { own = String(clickEl.textContent || "").replace(/\s+/g, " ").trim(); } catch (_eT) {}
+      if (/^pair\s*information$/i.test(own)) return;
+      let r;
+      try { r = clickEl.getBoundingClientRect(); } catch (_eR) { return; }
+      if (!r || r.width < 6 || r.height < 6 || r.width > 64 || r.height > 64) return;
+      if (!isVisibleNode(clickEl)) return;
+      found.push({ svg: svg, el: clickEl, r: r });
+    }
+    function scanRoot(root) {
+      if (!root || !root.querySelectorAll) return;
+      try {
+        const a = root.querySelectorAll("svg.icon-pair-information, .icon-pair-information");
+        for (let i = 0; i < a.length; i++) consider(a[i]);
+      } catch (_e0) {}
+      try {
+        const ns = root.querySelectorAll("use[*|href*='icon-pair-information']");
+        for (let i = 0; i < ns.length; i++) {
+          const u = ns[i];
+          let svg = u;
+          try { svg = (u.closest && u.closest("svg")) || u.parentElement; } catch (_eC) { svg = u.parentElement; }
+          consider(svg || u);
+        }
+      } catch (_e1) {}
+      try {
+        const uses = root.querySelectorAll("use");
+        for (let i = 0; i < uses.length; i++) {
+          if (!/icon-pair-information/i.test(pairInfoUseHref(uses[i]))) continue;
+          const u = uses[i];
+          let svg = u;
+          try { svg = (u.closest && u.closest("svg")) || u.parentElement; } catch (_eC2) { svg = u.parentElement; }
+          consider(svg || u);
+        }
+      } catch (_e2) {}
+    }
+    forEachRoot(scanRoot);
+    try {
+      const extra = largeSameOriginChartDocs();
+      for (let i = 0; i < extra.length; i++) scanRoot(extra[i]);
+    } catch (_e3) {}
+    return found;
+  }
+
+  function findPairInfoIcon() {
+    const icons = collectPairInfoIcons();
+    if (!icons.length) return null;
+    const wide = window.innerWidth || 1200;
+    const high = window.innerHeight || 800;
+    const want = visiblePair() || lastSeenPair;
+    let pairRect = null;
+    if (want) {
+      try {
+        const pairRe = new RegExp(String(want).replace("/", "\\s*/\\s*") + "(?:\\s*\\(?OTC\\)?)?", "i");
+        const nodes = document.querySelectorAll("button, span, div, a, b, strong, p, label");
+        const nMax = Math.min(nodes.length, 400);
+        let best = null, bestScore = -1e9;
+        for (let i = 0; i < nMax; i++) {
+          const el = nodes[i];
+          if (skipHudDashEl(el)) continue;
+          if (inMarketList(el) || inAssetListOverlay(el)) continue;
+          let t = "";
+          try { t = String(el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+          if (!t || t.length > 48) continue;
+          if (!pairRe.test(t) && labelFromText(t) !== want) continue;
+          let r;
+          try { r = el.getBoundingClientRect(); } catch (_eR) { continue; }
+          if (!r || r.width < 4 || r.height < 4) continue;
+          const inRight = r.left > wide * 0.55 && r.top > 8 && r.top < high * 0.72;
+          if (!inRight) continue;
+          const score = -r.top + (t.length < 22 ? 40 : 0);
+          if (score > bestScore) { bestScore = score; best = r; }
+        }
+        pairRect = best;
+      } catch (_eP) {}
+    }
+    let best = null, bestScore = -1e9;
+    for (let i = 0; i < icons.length; i++) {
+      const it = icons[i];
+      const r = it.r;
+      let score = 0;
+      const inRight = r.left > wide * 0.55 && r.top > 8 && r.top < high * 0.78;
+      if (inRight) score += 800;
+      else score -= 500;
+      if (pairRect) {
+        const sameRow = Math.abs((r.top + r.height / 2) - (pairRect.top + pairRect.height / 2)) < 28;
+        const near = r.left >= pairRect.left - 12 && r.left - pairRect.right < 80;
+        if (sameRow) score += 400;
+        if (near) score += 300;
+        score -= Math.abs((r.top + r.height / 2) - (pairRect.top + pairRect.height / 2));
+      }
+      score -= (r.width + r.height);
+      if (score > bestScore) { bestScore = score; best = it; }
+    }
+    return best;
+  }
+
   function ensurePairInfoOpen() {
-    /* v0.9.29-ext: still disabled. Never click (i) / pair / asset list.
-       Price comes from Tesseract OCR of the chart-axis live tag crop. */
-    return;
+    if (topHudYielded) return false;
+    if (pairInfoPopupOpen()) return true;
+    try {
+      const pn = readPriceNow();
+      if (pn && pn.v != null) return true;
+    } catch (_ePn) {}
+    if (pairInfoClickBanned) return false;
+    if (isAssetListOpen()) {
+      try { dismissAssetList(); } catch (_eD0) {}
+      return false;
+    }
+    const now = Date.now();
+    if (lastPairInfoClickAt && now - lastPairInfoClickAt < 8000) return false;
+    const icon = findPairInfoIcon();
+    if (!icon || !icon.el) return false;
+    try { moveHudOffPair(null, icon.r); } catch (_eH) {}
+    lastPairInfoClickAt = now;
+    lastPairInfoClickPair = visiblePair() || lastSeenPair || "";
+    try { realishClick(icon.el); } catch (_eC) {}
+    setTimeout(function () {
+      try {
+        if (pairInfoPopupOpen()) return;
+        try {
+          const pn2 = readPriceNow();
+          if (pn2 && pn2.v != null) return;
+        } catch (_ePn2) {}
+        if (isAssetListOpen()) {
+          dismissAssetList();
+          pairInfoClickBanned = true;
+          lastAssetListDismissAt = Date.now();
+        }
+      } catch (_eA) {}
+    }, 400);
+    return false;
   }
 
   const quoteSeen = {};
@@ -1665,6 +1904,7 @@
     lastPairInfoClickAt = 0;
     lastPairInfoClickPair = "";
     lastAssetListDismissAt = 0;
+    pairInfoClickBanned = false;
     lastCanvasOcr = { v: null, at: 0 };
     lastCanvasCd = { sec: null, at: 0, text: "", money: false };
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
@@ -1748,27 +1988,11 @@
       return null;
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
-    /* (a) last canvas-OCR value if fresh (<15s, same as hold) and ok(range) */
-    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
-      lastCanvasOcr.v = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
-      if (ok(lastCanvasOcr.v, lastCanvasOcr)) {
-        rememberQuotes([lastCanvasOcr.v]);
-        return acceptLivePx(lastCanvasOcr.v);
-      }
-    }
-    /* (b) hit-test if it ever works (elementsFromPoint often sees only canvas) */
-    const tag = readLiveTagByHit();
-    if (tag && tag.el) bindLivePriceObserver(tag.el);
-    if (tag && tag.v != null) tag.v = correctOcr(tag.v, range, state.lastGoodPx);
-    if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
-      rememberQuotes([tag.v]);
-      return acceptLivePx(tag.v);
-    }
-    /* (c) Price Now only if the popup happens to already be open. Never click (i). */
+    /* (a) Price Now only if the popup is already open. Never click (i)/pair list. */
     const pn = readPriceNow();
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
-      if (!(tag && tag.el)) bindLivePriceObserver(pn.el);
+      bindLivePriceObserver(pn.el);
     }
     if (pn && pn.v != null) pn.v = correctOcr(pn.v, range, state.lastGoodPx);
     if (pn && ok(pn.v)) {
@@ -1778,6 +2002,22 @@
     }
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       return state.lastGoodPx;
+    }
+    /* (b) last canvas-OCR value if fresh (<15s HUD hold) and ok(range) */
+    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
+      lastCanvasOcr.v = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
+      if (ok(lastCanvasOcr.v, lastCanvasOcr)) {
+        rememberQuotes([lastCanvasOcr.v]);
+        return acceptLivePx(lastCanvasOcr.v);
+      }
+    }
+    /* (c) hit-test if it ever works (elementsFromPoint often sees only canvas) */
+    const tag = readLiveTagByHit();
+    if (tag && tag.el) bindLivePriceObserver(tag.el);
+    if (tag && tag.v != null) tag.v = correctOcr(tag.v, range, state.lastGoodPx);
+    if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
+      rememberQuotes([tag.v]);
+      return acceptLivePx(tag.v);
     }
     /* (d) OCR miss: keep lastGoodPx if < 15000ms old (do not flash HUD —). After 15s, —. */
     const held = holdLivePx();
@@ -3660,6 +3900,9 @@
     return 1e9;
   }
   function priceOcrFresh() {
+    try {
+      if (lastPriceNowOpen && lastPnAt && (Date.now() - lastPnAt) < 2000) return true;
+    } catch (_ePn) {}
     return liveOcrAgeMs() < 2000;
   }
   async function waitForFreshOcr(ms) {
@@ -3691,7 +3934,7 @@
     return 0;
   }
   function isGhostWaitReason(r) {
-    return /trade open|cooldown|wait\s*\d+\s*s/i.test(String(r || ""));
+    return /trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(r || ""));
   }
   function clearGhostWaitReason() {
     try {
@@ -4547,13 +4790,58 @@
     log("OTC miss · canvas");
   }
 
-  function requestCanvasCapture() {
-    if (topHudYielded) return;
-    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
+  function flushCaptureWaiters() {
+    const w = captureWaiters.slice();
+    captureWaiters = [];
+    for (let i = 0; i < w.length; i++) {
+      try { w[i](); } catch (_eW) {}
+    }
+  }
+
+  function priceNowAlreadyOpen() {
+    try {
+      const pn = readPriceNow();
+      if (pn && pn.v != null) {
+        lastPriceNowEl = pn.el || lastPriceNowEl;
+        lastPriceNowOpen = true;
+        lastPnAt = Date.now();
+        return pn;
+      }
+    } catch (_e) {}
+    return null;
+  }
+
+  function requestCanvasCapture(done) {
+    if (typeof done === "function") captureWaiters.push(done);
+    if (topHudYielded) {
+      flushCaptureWaiters();
+      return;
+    }
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      flushCaptureWaiters();
+      return;
+    }
+    /* Popup already open (div.XfvzC Pair Information) with Price Now: skip screenshot, never click heading/svg. */
+    if (pairInfoPopupOpen() && priceNowAlreadyOpen()) {
+      try { onQuoteTick(); } catch (_ePn) {}
+      flushCaptureWaiters();
+      return;
+    }
+    if (priceNowAlreadyOpen()) {
+      try { onQuoteTick(); } catch (_ePn2) {}
+      flushCaptureWaiters();
+      return;
+    }
+    try { ensurePairInfoOpen(); } catch (_eI) {}
+    if (pairInfoPopupOpen() && priceNowAlreadyOpen()) {
+      try { onQuoteTick(); } catch (_ePn3) {}
+      flushCaptureWaiters();
+      return;
+    }
     const now = Date.now();
     /* Tesseract can take several seconds; if sendMessage never callbacks, unstick the eye. */
     if (captureBusy && now - lastCaptureAt >= 8000) captureBusy = false;
-    if (captureBusy || now - lastCaptureAt < 800) return;
+    if (captureBusy) return;
     lastCaptureAt = now;
     captureBusy = true;
     const dpr = window.devicePixelRatio || 1;
@@ -4563,52 +4851,75 @@
       if (rect) msg.rect = rect;
     } catch (_eR) {}
     try { msg.needCd = (domCountdownSec() == null); } catch (_eN) { msg.needCd = true; }
-    const failsafe = setTimeout(function () { captureBusy = false; }, 8000);
-    try {
-      chrome.runtime.sendMessage(
-        msg,
-        function (resp) {
-          captureBusy = false;
-          try { clearTimeout(failsafe); } catch (_eC) {}
-          let err = null;
-          try { err = chrome.runtime.lastError; } catch (_e0) {}
-          const at = Number(resp && resp.capturedAt) || Date.now();
-          if (resp && resp.cdSec != null && Number(resp.cdSec) > 2) {
-            const sec = Number(resp.cdSec);
-            const prev = lastCanvasCd || {};
-            const prevSec = Number(prev.sec);
-            let storeAt = at;
-            let holdAt = at;
-            if (sec <= 2 && prevSec >= 1 && prevSec <= 2) {
-              storeAt = prev.at || at;
-              holdAt = prev.holdAt || prev.at || at;
-            }
-            lastCanvasCd = {
-              sec: sec,
-              at: storeAt,
-              text: resp.cdText ? String(resp.cdText) : "",
-              money: !!resp.cdMoney,
-              holdAt: holdAt
-            };
-          }
-          if (err || !resp || !resp.ok || resp.v == null) {
-            try { onQuoteTick(); } catch (_eM) {}
-            return;
-          }
-          const v = Number(resp.v);
-          if (!isFinite(v) || v < 0.05) {
-            try { onQuoteTick(); } catch (_eM2) {}
-            return;
-          }
-          lastCanvasOcr = { v: v, at: at, text: resp.text ? String(resp.text) : "" };
-          try { onQuoteTick(); } catch (_e1) {}
+    const failsafe = setTimeout(function () {
+      captureBusy = false;
+      flushCaptureWaiters();
+    }, 8000);
+    function finishCapture(resp) {
+      captureBusy = false;
+      try { clearTimeout(failsafe); } catch (_eC) {}
+      let err = null;
+      try { err = chrome.runtime.lastError; } catch (_e0) {}
+      const at = Number(resp && resp.capturedAt) || Date.now();
+      if (resp && resp.cdSec != null && Number(resp.cdSec) > 2) {
+        const sec = Number(resp.cdSec);
+        const prev = lastCanvasCd || {};
+        const prevSec = Number(prev.sec);
+        let storeAt = at;
+        let holdAt = at;
+        if (sec <= 2 && prevSec >= 1 && prevSec <= 2) {
+          storeAt = prev.at || at;
+          holdAt = prev.holdAt || prev.at || at;
         }
-      );
+        lastCanvasCd = {
+          sec: sec,
+          at: storeAt,
+          text: resp.cdText ? String(resp.cdText) : "",
+          money: !!resp.cdMoney,
+          holdAt: holdAt
+        };
+      }
+      if (err || !resp || !resp.ok || resp.v == null) {
+        try { onQuoteTick(); } catch (_eM) {}
+        flushCaptureWaiters();
+        return;
+      }
+      const v = Number(resp.v);
+      if (!isFinite(v) || v < 0.05) {
+        try { onQuoteTick(); } catch (_eM2) {}
+        flushCaptureWaiters();
+        return;
+      }
+      lastCanvasOcr = { v: v, at: at, text: resp.text ? String(resp.text) : "" };
+      try { onQuoteTick(); } catch (_e1) {}
+      flushCaptureWaiters();
+    }
+    try {
+      chrome.runtime.sendMessage(msg, finishCapture);
     } catch (_e) {
       captureBusy = false;
       try { clearTimeout(failsafe); } catch (_eC2) {}
       try { onQuoteTick(); } catch (_eM3) {}
+      flushCaptureWaiters();
     }
+  }
+
+  function startCaptureLoop() {
+    if (window.__quotexbotCapLoop) return;
+    window.__quotexbotCapLoop = true;
+    function loop() {
+      if (topHudYielded) {
+        window.__quotexbotCapLoop = false;
+        return;
+      }
+      const t0 = Date.now();
+      requestCanvasCapture(function () {
+        const period = Number(CONFIG.captureMs) > 0 ? Number(CONFIG.captureMs) : 1500;
+        const wait = Math.max(0, period - (Date.now() - t0));
+        setTimeout(loop, wait);
+      });
+    }
+    loop();
   }
 
   function startQuoteObserver() {
@@ -4616,12 +4927,13 @@
     window.__quotexbotObs = true;
     setInterval(function () {
       bindAxisObserver();
-      requestCanvasCapture();
+      try { ensurePairInfoOpen(); } catch (_eI) {}
       onQuoteTick();
     }, CONFIG.recordMs);
     bindAxisObserver();
-    requestCanvasCapture();
+    try { ensurePairInfoOpen(); } catch (_eI0) {}
     onQuoteTick();
+    startCaptureLoop();
   }
 
   setInterval(function () {
