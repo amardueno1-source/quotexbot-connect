@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.19-ext)
+ * quotexbot Chrome MV3 content script (v0.9.20-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.19-ext",
+    version: "0.9.20-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -523,6 +523,8 @@
       "NZD/USD": [0.40, 0.90],
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
+      "USD/ARS": [200, 5000],
+      "CAD/CHF": [0.40, 0.90],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -544,6 +546,8 @@
   let axisObs = null;
   let lastAxisEl = null;
   let lastPriceNowEl = null;
+  let lastPriceNowOpen = false;
+  let lastPnAt = 0;
   let lastPairInfoClickAt = 0;
   let lastAxisScanN = 0;
   let lastHudSig = "";
@@ -580,8 +584,8 @@
     state.lastGoodPx = null;
     try { saveState(state); } catch (_e) {}
   }
-  /* Saved HUD over pair-header zone (~top 280px) blocks the chart (i). Use CSS default. */
-  if (state.hudWin && state.hudWin.top != null && Number(state.hudWin.top) < 280) {
+  /* Saved HUD over pair chip / asset list (left < 420) covers the chart (i). Use bottom-right. */
+  if (state.hudWin && state.hudWin.left != null && Number(state.hudWin.left) < 420) {
     state.hudWin = null;
   }
   state.lastPx = "—";
@@ -661,7 +665,7 @@
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e2) {}
       found.push({ v: v, font: font, area: r.width * r.height, y: r.top, x: r.left, decimals: decimals });
     }
-    const re = /(\d{1,6}(?:\.\d{2,6}))/g;
+    const re = /(\d{1,6}(?:\.\d{1,6}))/g;
     const nodes = document.querySelectorAll("span, div, b, strong, p, label, em, h1, h2, h3, td, li");
     const nAll = nodes.length;
     const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
@@ -696,7 +700,7 @@
         if (pel && inMarketList(pel)) continue;
         if (/[+\u2212$]/.test(node.nodeValue || "")) continue;
         const t = (node.nodeValue || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
-        const mm = t.match(/\d{1,6}\.\d{2,6}/);
+        const mm = t.match(/\d{1,6}\.\d{1,6}/);
         if (!mm) continue;
         const el = node.parentElement || document.body;
         add(parseFloat(mm[0]), el, (mm[0].split(".")[1] || "").length);
@@ -723,7 +727,7 @@
       const leftMin = wide * 0.45;
       const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
       const scored = [];
-      const pxRe = /^\d{1,6}\.\d{2,6}$/;
+      const pxRe = /^\d{1,6}\.\d{1,6}$/;
       for (let i = list.length - 1; i >= 0; i--) {
         const el = list[i];
         let raw = "";
@@ -867,7 +871,7 @@
         let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
         if (!t || t.length > 28) continue;
         if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
-        const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
+        const m = t.match(/^(\d{1,6}\.\d{1,6})$/);
         if (!m) continue;
         const v = parseFloat(m[1]);
         if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
@@ -926,7 +930,7 @@
   function parsePriceNowNumber(raw) {
     const str = String(raw || "");
     if (!str) return null;
-    const re = /(\d{1,6}\.\d{2,6})/g;
+    const re = /(\d{1,6}\.\d{1,6})/g;
     let m;
     while ((m = re.exec(str))) {
       const i = m.index, e = i + m[1].length;
@@ -1020,7 +1024,7 @@
       if (!t || t.length > 16) return false;
       if (t === String(v)) return true;
       const n2 = parseFloat(t);
-      return /^\d{1,6}\.\d{2,6}$/.test(t) && isFinite(n2) && Math.abs(n2 - v) < 1e-9;
+      return /^\d{1,6}\.\d{1,6}$/.test(t) && isFinite(n2) && Math.abs(n2 - v) < 1e-9;
     }
     if (isNumNode(el) && (!el.childElementCount || el.childElementCount <= 2)) return el;
     try {
@@ -1042,6 +1046,7 @@
     const dashEl = document.getElementById("quotexbot-dash");
     const strongRe = /price\s*now/i;
     let preferred = null;
+    let sawLabel = false;
     function consider(el) {
       if (preferred) return;
       if (hud && (el === hud || hud.contains(el))) return;
@@ -1052,6 +1057,7 @@
       if (!rawT) return;
       if (/\b\d{1,2}\s*min\b/i.test(rawT) && !strongRe.test(rawT) && rawT.length < 24) return;
       if (!strongRe.test(rawT)) return;
+      sawLabel = true;
       let v = parsePriceNowNumber(rawT);
       if (v == null) {
         try {
@@ -1077,6 +1083,7 @@
         }
       } catch (_e0) {}
     });
+    lastPriceNowOpen = !!(sawLabel || preferred);
     return preferred;
   }
 
@@ -1277,6 +1284,8 @@
     lastObservedPx = null;
     lastAxisEl = null;
     lastPriceNowEl = null;
+    lastPriceNowOpen = false;
+    lastPnAt = 0;
     lastPairInfoClickAt = 0;
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
     try { if (axisObs) axisObs.disconnect(); } catch (_e2) {}
@@ -1308,6 +1317,7 @@
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
       state.lastGoodPx = pn.v;
+      lastPnAt = Date.now();
       if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
       return pn.v;
     }
@@ -1320,8 +1330,18 @@
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
       state.lastGoodPx = pn.v;
+      lastPnAt = Date.now();
       if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
       return pn.v;
+    }
+    /* Keep last good Price Now up to 2s on a single parse miss while popup is still open. */
+    if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
+      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
+      return state.lastGoodPx;
+    }
+    if (lastPriceNowOpen) {
+      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
+      return null;
     }
     const axis = readAxisLivePrice();
     if (diag) {
@@ -2050,7 +2070,7 @@
   }
 
   const HUD_CSS = `
-    #quotexbot-hud{position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647 !important;width:380px;height:480px;
+    #quotexbot-hud{position:fixed;bottom:12px;right:12px;top:auto;left:auto;z-index:2147483647 !important;width:380px;height:480px;
       background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
       user-select:none;display:flex !important;flex-direction:column;visibility:visible !important;opacity:1 !important;
@@ -2121,10 +2141,10 @@
       (top != null && (top < 0 || top > window.innerHeight - 40));
     if (off) {
       if (which === "hud") {
-        el.style.left = "12px";
+        el.style.right = "12px";
         el.style.bottom = "12px";
         el.style.top = "auto";
-        el.style.right = "auto";
+        el.style.left = "auto";
       }
       return;
     }
@@ -2221,10 +2241,10 @@
 
   function pinHud(el) {
     if (!el) return;
-    el.style.left = "12px";
+    el.style.right = "12px";
     el.style.bottom = "12px";
     el.style.top = "auto";
-    el.style.right = "auto";
+    el.style.left = "auto";
     el.style.zIndex = "2147483647";
   }
 
@@ -2234,7 +2254,7 @@
     if (old && old.parentNode) old.parentNode.removeChild(old);
     const el = document.createElement("div");
     el.id = "quotexbot-hud";
-    el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
+    el.setAttribute("style", "position:fixed;bottom:12px;right:12px;top:auto;left:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
     function mount(n) {
       const host = document.body;
       if (!host) {
