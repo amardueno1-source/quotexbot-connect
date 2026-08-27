@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.29-ext)
+ * quotexbot Chrome MV3 content script (v0.9.30-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -493,7 +493,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.29-ext",
+    version: "0.9.30-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1590,7 +1590,7 @@
       return v;
     }
     function holdLivePx() {
-      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 2500) {
+      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
         return state.lastGoodPx;
       }
       return null;
@@ -1622,7 +1622,7 @@
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       return state.lastGoodPx;
     }
-    /* (d) OCR miss: keep lastGoodPx if < 2500ms old (do not flash HUD —). After 2.5s, —. */
+    /* (d) OCR miss: keep lastGoodPx if < 15000ms old (do not flash HUD —). After 15s, —. */
     const held = holdLivePx();
     if (held != null) return held;
     return null;
@@ -2804,7 +2804,7 @@
   function logCanvasMiss() {
     const sig = "OTC miss · canvas";
     const now = Date.now();
-    if (sig !== lastMissSig || now - lastMissLogAt > 4000) {
+    if (sig !== lastMissSig || now - lastMissLogAt > 8000) {
       lastMissSig = sig;
       lastMissLogAt = now;
       log(sig);

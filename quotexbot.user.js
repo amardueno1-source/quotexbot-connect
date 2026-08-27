@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.29
+// @version      0.9.30
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.29",
+    version: "0.9.30",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1201,7 +1201,7 @@ if (window.__quotexbotAbortInstalled) {
       if (ok(all[i].v, all[i])) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
     }
     if (!cands.length) {
-      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 2500) {
+      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
         return state.lastGoodPx;
       }
       return null;
@@ -2388,7 +2388,7 @@ if (window.__quotexbotAbortInstalled) {
       }
       const sig = "OTC miss · axis" + miss.axis + " cand" + miss.cand;
       const now = Date.now();
-      if (sig !== lastMissSig || now - lastMissLogAt > 4000) {
+      if (sig !== lastMissSig || now - lastMissLogAt > 8000) {
         lastMissSig = sig;
         lastMissLogAt = now;
         log(sig);
