@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.11
+// @version      0.9.12
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -34,7 +34,7 @@
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @all_frames   true
-// @run-at       document-end
+// @run-at       document-idle
 // ==/UserScript==
 
 /**
@@ -48,11 +48,15 @@
 (function quotexbotLoader() {
   function quotexbotShouldBoot() {
     try {
-      const href = String((location && location.href) || "");
       const w = window.innerWidth || 0, h = window.innerHeight || 0;
-      if (window.top === window) return w >= 400 && h >= 300;
-      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
-    } catch (_e) { return true; }
+      if (w < 50 || h < 50) return false; // hidden/tiny
+      if (window.top === window) {
+        // top shell often covered by iframe — still boot, but iframe boot is the visible one
+        return w >= 300 && h >= 200;
+      }
+      // visible chart iframe: LARGE only, no URL regex
+      return w >= 600 && h >= 400;
+    } catch (_e) { return window.top === window; }
   }
   if (!quotexbotShouldBoot()) return;
   function verNewer(remote, local) {
@@ -66,7 +70,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.11";
+  const FILE_VER = "0.9.12";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -103,11 +107,15 @@ if (window.__quotexbotAbortInstalled) {
   "use strict";
   function quotexbotShouldBoot() {
     try {
-      const href = String((location && location.href) || "");
       const w = window.innerWidth || 0, h = window.innerHeight || 0;
-      if (window.top === window) return w >= 400 && h >= 300;
-      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
-    } catch (_e) { return true; }
+      if (w < 50 || h < 50) return false; // hidden/tiny
+      if (window.top === window) {
+        // top shell often covered by iframe — still boot, but iframe boot is the visible one
+        return w >= 300 && h >= 200;
+      }
+      // visible chart iframe: LARGE only, no URL regex
+      return w >= 600 && h >= 400;
+    } catch (_e) { return window.top === window; }
   }
   if (!quotexbotShouldBoot()) return;
 
@@ -550,11 +558,15 @@ if (window.__quotexbotAbortInstalled) {
   try {
   function quotexbotShouldBoot() {
     try {
-      const href = String((location && location.href) || "");
       const w = window.innerWidth || 0, h = window.innerHeight || 0;
-      if (window.top === window) return w >= 400 && h >= 300;
-      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
-    } catch (_e) { return true; }
+      if (w < 50 || h < 50) return false; // hidden/tiny
+      if (window.top === window) {
+        // top shell often covered by iframe — still boot, but iframe boot is the visible one
+        return w >= 300 && h >= 200;
+      }
+      // visible chart iframe: LARGE only, no URL regex
+      return w >= 600 && h >= 400;
+    } catch (_e) { return window.top === window; }
   }
   if (!quotexbotShouldBoot()) return;
   if (window.__quotexbotHudBoot) return;
@@ -564,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.11",
+    version: "0.9.12",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.68,
@@ -624,6 +636,7 @@ if (window.__quotexbotAbortInstalled) {
   let axisObs = null;
   let lastAxisEl = null;
   let lastHudSig = "";
+  let topHudYielded = false;
 
   function loadState() {
     try {
@@ -1865,6 +1878,15 @@ if (window.__quotexbotAbortInstalled) {
     st.textContent = HUD_CSS;
   }
 
+  function pinHud(el) {
+    if (!el) return;
+    el.style.left = "12px";
+    el.style.bottom = "12px";
+    el.style.top = "auto";
+    el.style.right = "auto";
+    el.style.zIndex = "2147483647";
+  }
+
   function createRoot() {
     injectCss();
     const old = document.getElementById("quotexbot-hud");
@@ -1872,17 +1894,20 @@ if (window.__quotexbotAbortInstalled) {
     const el = document.createElement("div");
     el.id = "quotexbot-hud";
     el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
-    (document.body || document.documentElement).appendChild(el);
-    applyWin(el, "hud");
-    try {
-      const r = el.getBoundingClientRect();
-      if (r.left < 0 || r.left > window.innerWidth - 60 || r.top < 0 || r.top > window.innerHeight - 40) {
-        el.style.left = "12px";
-        el.style.bottom = "12px";
-        el.style.top = "auto";
-        el.style.right = "auto";
+    function mount(n) {
+      const host = document.body;
+      if (!host) {
+        if (n < 15) setTimeout(function () { mount(n + 1); }, 300);
+        else {
+          try { (document.documentElement || document).appendChild(el); } catch (_e0) {}
+        }
+        return;
       }
-    } catch (_e) {}
+      host.appendChild(el);
+      applyWin(el, "hud");
+      pinHud(el);
+    }
+    mount(0);
     return el;
   }
 
@@ -1910,6 +1935,7 @@ if (window.__quotexbotAbortInstalled) {
   let dash = createDash();
 
   function renderDash() {
+    if (topHudYielded) return;
     dash = createDash();
     if (!state.dashOpen) {
       dash.className = "";
@@ -1947,6 +1973,7 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   function render() {
+    if (topHudYielded) return;
     const snap = snapDoc();
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
@@ -2032,7 +2059,40 @@ if (window.__quotexbotAbortInstalled) {
   }
   bindHud(root);
 
+  function hasLargeChartIframe() {
+    try {
+      const list = document.querySelectorAll("iframe");
+      for (let i = 0; i < list.length; i++) {
+        let w = 0, h = 0;
+        try {
+          const r = list[i].getBoundingClientRect();
+          w = r.width || 0;
+          h = r.height || 0;
+        } catch (_e1) {}
+        if (w >= 600 && h >= 400) return true;
+      }
+    } catch (_e) {}
+    return false;
+  }
+  function yieldTopHudToIframe() {
+    if (window.top !== window) return;
+    if (!hasLargeChartIframe()) return;
+    topHudYielded = true;
+    try {
+      const hud = document.getElementById("quotexbot-hud");
+      if (hud && hud.parentNode) hud.parentNode.removeChild(hud);
+    } catch (_e0) {}
+    try {
+      const d = document.getElementById("quotexbot-dash");
+      if (d && d.parentNode) d.parentNode.removeChild(d);
+    } catch (_e1) {}
+  }
+  if (window.top === window) {
+    setTimeout(yieldTopHudToIframe, 1500);
+  }
+
   function ensureHud() {
+    if (topHudYielded) return;
     const live = document.getElementById("quotexbot-hud");
     if (live && live.isConnected) {
       root = live;
