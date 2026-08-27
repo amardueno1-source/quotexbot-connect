@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.40-ext)
+ * quotexbot Chrome MV3 content script (v0.9.41-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -544,7 +544,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.40-ext",
+    version: "0.9.41-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -2130,12 +2130,60 @@
     return { signal: "SKIP", reason: "no aligned setup" };
   }
 
+
+  let botSyntheticClick = false;
+  function isBotChrome(el) {
+    if (!el) return true;
+    try {
+      if (el.id === "quotexbot-hud" || el.id === "quotexbot-dash") return true;
+      if (el.closest && (el.closest("#quotexbot-hud") || el.closest("#quotexbot-dash"))) return true;
+      const hud = document.getElementById("quotexbot-hud");
+      const dashEl = document.getElementById("quotexbot-dash");
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) return true;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) return true;
+    } catch (_e) {}
+    return false;
+  }
+  function isHudControlText(t) {
+    const s = String(t || "").replace(/\s+/g, " ").trim();
+    if (!s) return false;
+    if (/^(start auto|stop auto|up|down|dashboard)$/i.test(s)) return true;
+    if (/\bstart\s*auto\b|\bstop\s*auto\b/i.test(s)) return true;
+    if (/অটো ট্রেড চালু|অটো বন্ধ করো|^উপরে$|^নিচে$|ড্যাশবোর্ড/.test(s)) return true;
+    return false;
+  }
+  function canClickPlatform(el) {
+    if (!el) return false;
+    if (isBotChrome(el)) return false;
+    try {
+      if (el.getAttribute && el.getAttribute("data-act")) return false;
+    } catch (_e0) {}
+    let t = "";
+    try { t = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e1) {}
+    if (isHudControlText(t)) return false;
+    return true;
+  }
+  function platformClick(el) {
+    if (!canClickPlatform(el)) return false;
+    botSyntheticClick = true;
+    try {
+      if (typeof el.click === "function") el.click();
+      else if (typeof realishClick === "function") realishClick(el);
+      else { botSyntheticClick = false; return false; }
+    } catch (_e) {
+      botSyntheticClick = false;
+      return false;
+    }
+    botSyntheticClick = false;
+    return true;
+  }
+
   function clickableByText(needle) {
     const want = needle.toLowerCase().replace(/\s+/g, "");
     const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div, li"));
     let best = null, bestLen = 1e9;
     for (const el of nodes) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el)) continue;
       const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 40) continue;
       const n = t.toLowerCase().replace(/\s+/g, "");
@@ -2149,7 +2197,7 @@
   function findSearchBox() {
     const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"));
     for (const el of inputs) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el) || isBotChrome(el)) continue;
       const ph = ((el.getAttribute("placeholder") || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
       if (/search|asset|pair|symbol|find|поиск|buscar|suche|recherche/i.test(ph)) return el;
       if ((el.type || "") === "search") return el;
@@ -2176,14 +2224,13 @@
     const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div"));
     let best = null, bestLen = 1e9;
     for (const el of nodes) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el)) continue;
       const t = (el.innerText || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 28) continue;
       if (!/^[A-Z]{3}\s*\/\s*[A-Z]{3}/i.test(t) && !/\(\s*OTC\s*\)/i.test(t)) continue;
       if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
-    if (best && typeof best.click === "function") {
-      best.click();
+    if (best && platformClick(best)) {
       return true;
     }
     return false;
@@ -2195,11 +2242,11 @@
     if (already.includes(compact)) return true;
 
     let chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && typeof chip.click === "function") {
-      chip.click();
+    if (chip && canClickPlatform(chip) && typeof chip.click === "function") {
+      platformClick(chip);
       await sleep(400);
       const item = clickableByText(label);
-      if (item && item !== chip && typeof item.click === "function") item.click();
+      if (item && item !== chip && canClickPlatform(item)) platformClick(item);
       await sleep(700);
       const now = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
       if (now.includes(compact)) return true;
@@ -2218,8 +2265,7 @@
       await sleep(700);
     }
     chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && typeof chip.click === "function") {
-      chip.click();
+    if (chip && canClickPlatform(chip) && platformClick(chip)) {
       await sleep(800);
       return true;
     }
@@ -2387,8 +2433,7 @@
     const wide = window.innerWidth || 1200;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       if (fromEl && el === fromEl) continue;
       const t = typeof widgetText === "function" ? widgetText(el) : String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 48) continue;
@@ -2408,11 +2453,8 @@
       const score = kind * 100 + right - r.top * 0.01;
       if (score > bestScore) { bestScore = score; best = el; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     log("Investment SWITCH → $");
     return true;
   }
@@ -2437,7 +2479,7 @@
     const str = String(Math.floor(Number(dollars) || 1));
     let el = null;
     try { el = findInvestmentInput(); } catch (_e0) { el = null; }
-    if (!el) return false;
+    if (!el || isBotChrome(el)) return false;
     try {
       if (scrape && typeof scrape.setControlValue === "function") scrape.setControlValue(el, str);
       else {
@@ -2630,6 +2672,7 @@
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
       if (!t || t.length < 8 || t.length > 240) continue;
+      if (/\bpending\s*trade\b/i.test(t) && !/\d{1,2}:\d{2}/.test(t)) continue;
       const pairs = t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g);
       if (!pairs || pairs.length !== 1) continue;
       const pm = pairs[0].match(/([A-Za-z]{3})\s*\/\s*([A-Za-z]{3})/);
@@ -3019,13 +3062,8 @@
     const holdAt = lastCanvasCd.holdAt || lastCanvasCd.at;
     const elapsed = (now - lastCanvasCd.at) / 1000;
     const holdElapsed = (now - holdAt) / 1000;
-    /* 1–2s OCR: do not keep the 6s hold. After 2s wall, expired. */
-    if (raw <= 2) {
-      if (holdElapsed >= 2) return null;
-      const left = raw - elapsed;
-      if (!isFinite(left) || left < 1) return null;
-      return Math.floor(left);
-    }
+    /* Canvas OCR 00:01 / leftover 1s is a ghost. Never lock or display it. */
+    if (raw <= 2) return null;
     if (elapsed > 6) return null;
     const left = raw - elapsed;
     if (!isFinite(left) || left < 1) return null;
@@ -3110,21 +3148,8 @@
     }
     const n = Math.round(Number(raw));
     if (n >= 1 && n <= 2) {
-      if (!cdLowHoldAt) cdLowHoldAt = now;
-      const wall = (now - cdLowHoldAt) / 1000;
-      if (n === 1) {
-        if (!cdGhost1At) cdGhost1At = now;
-        if (now - cdGhost1At >= 4000) {
-          clearCountdownGhost1();
-          return null;
-        }
-      } else {
-        cdGhost1At = 0;
-      }
-      if (wall >= 2) return null;
-      const left = n - wall;
-      if (left < 1) return null;
-      return Math.floor(left);
+      clearCountdownGhost1();
+      return null;
     }
     cdLowHoldAt = 0;
     cdGhost1At = 0;
@@ -3135,12 +3160,15 @@
     try {
       const rows = listTradeRows();
       for (let i = 0; i < rows.length; i++) {
-        if (rows[i] && rows[i].open) return true;
+        const r = rows[i];
+        if (!r || !r.open) continue;
+        const s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
+        if (s != null && isFinite(s) && s > 2) return true;
       }
     } catch (_e0) {}
     try {
       const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return true;
+      if (rowCd != null && rowCd > 2) return true;
     } catch (_e1) {}
     return false;
   }
@@ -3176,14 +3204,8 @@
       for (let i = 0; i < real.length; i++) if (real[i].row) return real[i].s;
       return real[0].s;
     }
-    if (rowCd != null && rowCd > 0) return rowCd;
-    if (dom != null && dom > 0) return decayShortCountdown(dom);
-    if (cv != null && cv > 0) return decayShortCountdown(cv);
-    if (lastCanvasCd.sec != null && Number(lastCanvasCd.sec) >= 1 && Number(lastCanvasCd.sec) <= 2 && lastCanvasCd.at) {
-      if (rowCd != null && rowCd > 2) return rowCd;
-      return decayShortCountdown(1);
-    }
-    return decayShortCountdown(null);
+    /* Never surface 1–2s ghosts. Lock/HUD wait only when a real countdown is >2s. */
+    return null;
   }
   function pnlAlreadyUsed(used, n) {
     if (used[String(n)]) return true;
@@ -3456,10 +3478,10 @@
     let best = null, bestLen = 1e9;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       const t = widgetText(el);
       if (!t || t.length > 48) continue;
+      if (isHudControlText(t)) continue;
       if (/\bpending\s*trade\b/i.test(t) || /\bpending\b/i.test(t)) continue;
       if (!/switch\s*time/i.test(t)) continue;
       let r;
@@ -3467,11 +3489,8 @@
       if (!r || r.width < 6 || r.height < 6) continue;
       if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     log("SWITCH TIME → duration");
     return true;
   }
@@ -3493,8 +3512,7 @@
     const wide = window.innerWidth || 1200;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       const t = widgetText(el).replace(/\s+/g, "");
       if (!re.test(t) || t.toLowerCase() !== need) continue;
       let r;
@@ -3503,11 +3521,8 @@
       const score = (r.left > wide * 0.5 ? 80 : 0) - r.top;
       if (score > bestScore) { bestScore = score; best = el; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     return true;
   }
   async function ensureDurationMode() {
@@ -3574,32 +3589,42 @@
     }
     return false;
   }
-  function platformIdleNoTrade() {
+
+  function liveOpenEvidence() {
+    let rowCd = null, moneyCd = null, reserved = false;
     try {
-      const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return false;
+      const s = tradesListCountdownSec();
+      if (s != null && isFinite(s) && s > 2) rowCd = s;
     } catch (_e0) {}
-    try { if (hasOpenTradesListRow()) return false; } catch (_e1) {}
-    try { if (balanceIsReserved()) return false; } catch (_e2) {}
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e3) { cd = null; }
-    if (cd != null && cd > 2) return false;
+    try {
+      let dom = null;
+      if (typeof domCountdownSec === "function") dom = domCountdownSec();
+      else if (typeof screenCountdownSec === "function") dom = screenCountdownSec();
+      if (dom != null && isFinite(dom) && dom > 2) moneyCd = dom;
+    } catch (_e1) {}
+    if (moneyCd == null) {
+      try {
+        if (typeof canvasCountdownSec === "function" && lastCanvasCd && lastCanvasCd.money) {
+          const cv = canvasCountdownSec();
+          if (cv != null && isFinite(cv) && cv > 2) moneyCd = cv;
+        }
+      } catch (_e2) {}
+    }
+    try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
+    return { rowCd: rowCd, moneyCd: moneyCd, reserved: reserved };
+  }
+  function platformIdleNoTrade() {
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return false;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return false;
+    if (ev.reserved) return false;
     return true;
   }
   function realTradeOpenNow() {
-    try {
-      const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return true;
-    } catch (_e3) {}
-    if (hasOpenTradesListRow()) return true;
-    if (balanceIsReserved()) return true;
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e) { cd = null; }
-    if (cd != null && cd > 2) return true;
-    const ghostShort = (cd == null || cd <= 2);
-    if (ghostShort) return false;
-    try { if (canvasDollarBubbleOpen()) return true; } catch (_e1) {}
-    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return true;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return true;
+    if (ev.reserved) return true;
     return false;
   }
   function pendingJournal() {
@@ -3660,37 +3685,28 @@
     return false;
   }
   function tradeWaitSec() {
-    let rowCd = null;
-    try { rowCd = tradesListCountdownSec(); } catch (_eR) { rowCd = null; }
-    if (rowCd != null && rowCd > 0) return rowCd;
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e) { cd = null; }
-    if (cd != null && cd > 2) return cd;
-    try {
-      if (platformIdleNoTrade()) return 0;
-    } catch (_eI) {}
-    if (cd != null && cd > 0 && !shortCountdownUncorroborated(cd)) return cd;
-    try { if (realTradeOpenNow()) return Math.max(1, cd || 1); } catch (_e2) {}
-    const last = lastOkJournal();
-    if (last && !last.result && (last.t || 0) >= bootAt) {
-      try { if (platformIdleNoTrade()) return 0; } catch (_eI2) {}
-      const dur = saneDurMs(last.durMs);
-      return Math.max(1, Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000));
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return ev.rowCd;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
+    if (ev.reserved) {
+      const last = lastOkJournal();
+      if (last && !last.result && (last.t || 0) >= bootAt) {
+        const dur = saneDurMs(last.durMs);
+        const left = Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000);
+        if (left > 2) return left;
+      }
     }
-    try { if (platformIdleNoTrade()) return 0; } catch (_eI3) {}
-    const cool = Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
-    return cool;
+    return 0;
   }
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
-    if (realTradeOpenNow()) {
+    const ev = liveOpenEvidence();
+    const keep = (ev.rowCd != null && ev.rowCd > 2) || (ev.moneyCd != null && ev.moneyCd > 2) || ev.reserved;
+    if (keep) {
       staleBusyCleared = true;
       log("Boot: open trade on platform, keeping one-trade lock");
       return;
     }
-    let ready = false;
-    try { ready = !!readTimeWidgetValue(); } catch (_eU) {}
-    if (!ready && Date.now() - bootAt < 8000) return;
     staleBusyCleared = true;
     clickLock = false;
     lastClickAt = 0;
@@ -4303,7 +4319,7 @@
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
         <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
-        <p class="note">${(function(){ try { if (realTradeOpenNow()) { const left = tradeWaitSec(); if (left > 0) return "Trade open, wait " + left + "s"; } } catch(_eW) {} return state.lastReason || "Pair switch off. Save price and trade on the open chart."; })()}</p>
+        <p class="note">${(function(){ try { if (realTradeOpenNow()) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (/wait\s*1s/i.test(r) || /trade open,\s*wait\s*[12]s/i.test(r)) r = ""; return r || "Pair switch off. Save price and trade on the open chart."; })()}</p>
         <div class="logh"><span>Log · what the bot is doing</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -4316,6 +4332,7 @@
   }
 
   function onHudClick(ev) {
+    if (botSyntheticClick) return;
     const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
     if (!act) return;
     if (act === "mini") { state.minimized = true; saveState(state); render(); }
@@ -4354,6 +4371,7 @@
       return;
     }
     if (act === "auto") {
+      if (!ev || ev.isTrusted !== true) return;
       const snap = snapDoc();
       if (state.auto) {
         state.auto = false;
@@ -4362,6 +4380,7 @@
         state.lastReason = "Auto off on live account";
         log("Live, auto not started");
       } else {
+        /* state.auto = true ONLY here, from a real Start auto click. */
         state.auto = true;
         state.autoCount = 0;
         state.lastReason = "Auto on · pair browse";
@@ -4528,7 +4547,7 @@
           let err = null;
           try { err = chrome.runtime.lastError; } catch (_e0) {}
           const at = Number(resp && resp.capturedAt) || Date.now();
-          if (resp && resp.cdSec != null && Number(resp.cdSec) > 0) {
+          if (resp && resp.cdSec != null && Number(resp.cdSec) > 2) {
             const sec = Number(resp.cdSec);
             const prev = lastCanvasCd || {};
             const prevSec = Number(prev.sec);
@@ -4585,6 +4604,11 @@
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
     try { maybeApplyMmIdle(); } catch (_eMm) {}
+    try {
+      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
+        state.lastReason = "";
+      }
+    } catch (_eW1) {}
     if (state.auto) scanWatchlist();
     else {
       let waitSig = "";

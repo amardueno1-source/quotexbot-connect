@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.40
+// @version      0.9.41
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -600,7 +600,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.39",
+    version: "0.9.41",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -725,6 +725,9 @@ if (window.__quotexbotAbortInstalled) {
     state.minimized = false;
     try { saveState(state); } catch (_e) {}
   }
+  /* Never restore Auto ON from localStorage. User must press Start auto. */
+  state.auto = false;
+  try { saveState(state); } catch (_eAuto) {}
 
   function log(msg) {
     const now = new Date();
@@ -1706,12 +1709,60 @@ if (window.__quotexbotAbortInstalled) {
     });
   }
 
+
+  let botSyntheticClick = false;
+  function isBotChrome(el) {
+    if (!el) return true;
+    try {
+      if (el.id === "quotexbot-hud" || el.id === "quotexbot-dash") return true;
+      if (el.closest && (el.closest("#quotexbot-hud") || el.closest("#quotexbot-dash"))) return true;
+      const hud = document.getElementById("quotexbot-hud");
+      const dashEl = document.getElementById("quotexbot-dash");
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) return true;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) return true;
+    } catch (_e) {}
+    return false;
+  }
+  function isHudControlText(t) {
+    const s = String(t || "").replace(/\s+/g, " ").trim();
+    if (!s) return false;
+    if (/^(start auto|stop auto|up|down|dashboard)$/i.test(s)) return true;
+    if (/\bstart\s*auto\b|\bstop\s*auto\b/i.test(s)) return true;
+    if (/অটো ট্রেড চালু|অটো বন্ধ করো|^উপরে$|^নিচে$|ড্যাশবোর্ড/.test(s)) return true;
+    return false;
+  }
+  function canClickPlatform(el) {
+    if (!el) return false;
+    if (isBotChrome(el)) return false;
+    try {
+      if (el.getAttribute && el.getAttribute("data-act")) return false;
+    } catch (_e0) {}
+    let t = "";
+    try { t = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e1) {}
+    if (isHudControlText(t)) return false;
+    return true;
+  }
+  function platformClick(el) {
+    if (!canClickPlatform(el)) return false;
+    botSyntheticClick = true;
+    try {
+      if (typeof el.click === "function") el.click();
+      else if (typeof realishClick === "function") realishClick(el);
+      else { botSyntheticClick = false; return false; }
+    } catch (_e) {
+      botSyntheticClick = false;
+      return false;
+    }
+    botSyntheticClick = false;
+    return true;
+  }
+
   function clickableByText(needle) {
     const want = needle.toLowerCase().replace(/\s+/g, "");
     const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div, li"));
     let best = null, bestLen = 1e9;
     for (const el of nodes) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el)) continue;
       const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 40) continue;
       const n = t.toLowerCase().replace(/\s+/g, "");
@@ -1725,7 +1776,7 @@ if (window.__quotexbotAbortInstalled) {
   function findSearchBox() {
     const inputs = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"));
     for (const el of inputs) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el) || isBotChrome(el)) continue;
       const ph = ((el.getAttribute("placeholder") || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
       if (/search|asset|pair|symbol|find|поиск|buscar|suche|recherche/i.test(ph)) return el;
       if ((el.type || "") === "search") return el;
@@ -1752,14 +1803,13 @@ if (window.__quotexbotAbortInstalled) {
     const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div"));
     let best = null, bestLen = 1e9;
     for (const el of nodes) {
-      if (el.closest && el.closest("#quotexbot-hud")) continue;
+      if (!canClickPlatform(el)) continue;
       const t = (el.innerText || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 28) continue;
       if (!/^[A-Z]{3}\s*\/\s*[A-Z]{3}/i.test(t) && !/\(\s*OTC\s*\)/i.test(t)) continue;
       if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
-    if (best && typeof best.click === "function") {
-      best.click();
+    if (best && platformClick(best)) {
       return true;
     }
     return false;
@@ -1771,11 +1821,11 @@ if (window.__quotexbotAbortInstalled) {
     if (already.includes(compact)) return true;
 
     let chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && typeof chip.click === "function") {
-      chip.click();
+    if (chip && canClickPlatform(chip) && typeof chip.click === "function") {
+      platformClick(chip);
       await sleep(400);
       const item = clickableByText(label);
-      if (item && item !== chip && typeof item.click === "function") item.click();
+      if (item && item !== chip && canClickPlatform(item)) platformClick(item);
       await sleep(700);
       const now = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
       if (now.includes(compact)) return true;
@@ -1794,8 +1844,7 @@ if (window.__quotexbotAbortInstalled) {
       await sleep(700);
     }
     chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && typeof chip.click === "function") {
-      chip.click();
+    if (chip && canClickPlatform(chip) && platformClick(chip)) {
       await sleep(800);
       return true;
     }
@@ -1922,8 +1971,7 @@ if (window.__quotexbotAbortInstalled) {
     const wide = window.innerWidth || 1200;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       if (fromEl && el === fromEl) continue;
       const t = typeof widgetText === "function" ? widgetText(el) : String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t || t.length > 48) continue;
@@ -1943,11 +1991,8 @@ if (window.__quotexbotAbortInstalled) {
       const score = kind * 100 + right - r.top * 0.01;
       if (score > bestScore) { bestScore = score; best = el; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     log("Investment SWITCH → $");
     return true;
   }
@@ -1955,7 +2000,7 @@ if (window.__quotexbotAbortInstalled) {
     const str = String(Math.floor(Number(dollars) || 1));
     let el = null;
     try { el = findInvestmentInput(); } catch (_e0) { el = null; }
-    if (!el) return false;
+    if (!el || isBotChrome(el)) return false;
     try {
       if (scrape && typeof scrape.setControlValue === "function") scrape.setControlValue(el, str);
       else {
@@ -2128,6 +2173,7 @@ if (window.__quotexbotAbortInstalled) {
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
       if (!t || t.length < 8 || t.length > 240) continue;
+      if (/\bpending\s*trade\b/i.test(t) && !/\d{1,2}:\d{2}/.test(t)) continue;
       const pairs = t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g);
       if (!pairs || pairs.length !== 1) continue;
       const pm = pairs[0].match(/([A-Za-z]{3})\s*\/\s*([A-Za-z]{3})/);
@@ -2549,12 +2595,12 @@ if (window.__quotexbotAbortInstalled) {
         if (bestMoney == null || got < bestMoney) bestMoney = got;
       }
     }
-    if (bestMoney != null) return decayShortCountdown(bestMoney);
+    if (bestMoney != null && bestMoney > 2) return bestMoney;
     try {
       const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return decayShortCountdown(rowCd);
+      if (rowCd != null && rowCd > 2) return rowCd;
     } catch (_eR) {}
-    return decayShortCountdown(null);
+    return null;
   }
   function clearCountdownGhost1() {
     cdLowHoldAt = 0;
@@ -2573,21 +2619,8 @@ if (window.__quotexbotAbortInstalled) {
     }
     const n = Math.round(Number(raw));
     if (n >= 1 && n <= 2) {
-      if (!cdLowHoldAt) cdLowHoldAt = now;
-      const wall = (now - cdLowHoldAt) / 1000;
-      if (n === 1) {
-        if (!cdGhost1At) cdGhost1At = now;
-        if (now - cdGhost1At >= 4000) {
-          clearCountdownGhost1();
-          return null;
-        }
-      } else {
-        cdGhost1At = 0;
-      }
-      if (wall >= 2) return null;
-      const left = n - wall;
-      if (left < 1) return null;
-      return Math.floor(left);
+      clearCountdownGhost1();
+      return null;
     }
     cdLowHoldAt = 0;
     cdGhost1At = 0;
@@ -2598,12 +2631,15 @@ if (window.__quotexbotAbortInstalled) {
     try {
       const rows = listTradeRows();
       for (let i = 0; i < rows.length; i++) {
-        if (rows[i] && rows[i].open) return true;
+        const r = rows[i];
+        if (!r || !r.open) continue;
+        const sec = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
+        if (sec != null && isFinite(sec) && sec > 2) return true;
       }
     } catch (_e0) {}
     try {
       const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return true;
+      if (rowCd != null && rowCd > 2) return true;
     } catch (_e1) {}
     return false;
   }
@@ -2878,10 +2914,10 @@ if (window.__quotexbotAbortInstalled) {
     let best = null, bestLen = 1e9;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       const t = widgetText(el);
       if (!t || t.length > 48) continue;
+      if (isHudControlText(t)) continue;
       if (/\bpending\s*trade\b/i.test(t) || /\bpending\b/i.test(t)) continue;
       if (!/switch\s*time/i.test(t)) continue;
       let r;
@@ -2889,11 +2925,8 @@ if (window.__quotexbotAbortInstalled) {
       if (!r || r.width < 6 || r.height < 6) continue;
       if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     log("SWITCH TIME → duration");
     return true;
   }
@@ -2915,8 +2948,7 @@ if (window.__quotexbotAbortInstalled) {
     const wide = window.innerWidth || 1200;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
       const t = widgetText(el).replace(/\s+/g, "");
       if (!re.test(t) || t.toLowerCase() !== need) continue;
       let r;
@@ -2925,11 +2957,8 @@ if (window.__quotexbotAbortInstalled) {
       const score = (r.left > wide * 0.5 ? 80 : 0) - r.top;
       if (score > bestScore) { bestScore = score; best = el; }
     }
-    if (!best) return false;
-    try {
-      if (typeof best.click === "function") best.click();
-      else if (typeof realishClick === "function") realishClick(best);
-    } catch (_e2) { return false; }
+    if (!best || !canClickPlatform(best)) return false;
+    if (!platformClick(best)) return false;
     return true;
   }
   async function ensureDurationMode() {
@@ -2996,19 +3025,31 @@ if (window.__quotexbotAbortInstalled) {
     }
     return false;
   }
-  function realTradeOpenNow() {
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e) {}
+  function liveOpenEvidence() {
+    let rowCd = null, moneyCd = null, reserved = false;
     try {
-      const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return true;
-    } catch (_e3) {}
-    if (hasOpenTradesListRow()) return true;
-    if (balanceIsReserved()) return true;
-    const ghostShort = (cd == null || cd <= 2) && !hasOpenTradesListRow() && !balanceIsReserved();
-    if (ghostShort) return false;
-    if (cd != null && cd > 0) return true;
-    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
+      const sec = tradesListCountdownSec();
+      if (sec != null && isFinite(sec) && sec > 2) rowCd = sec;
+    } catch (_e0) {}
+    try {
+      const dom = screenCountdownSec();
+      if (dom != null && isFinite(dom) && dom > 2) moneyCd = dom;
+    } catch (_e1) {}
+    try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
+    return { rowCd: rowCd, moneyCd: moneyCd, reserved: reserved };
+  }
+  function platformIdleNoTrade() {
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return false;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return false;
+    if (ev.reserved) return false;
+    return true;
+  }
+  function realTradeOpenNow() {
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return true;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return true;
+    if (ev.reserved) return true;
     return false;
   }
   function pendingJournal() {
@@ -3029,11 +3070,13 @@ if (window.__quotexbotAbortInstalled) {
   function tradeBusy() {
     if (clickLock) return true;
     if (realTradeOpenNow()) return true;
+    try { if (platformIdleNoTrade()) return false; } catch (_eI) {}
     if (pendingJournal()) return true;
     return false;
   }
   function tradeOpen() {
     if (tradeBusy()) return true;
+    try { if (platformIdleNoTrade()) return false; } catch (_eI2) {}
     if (cooldownLeftMs() > 0) return true;
     return false;
   }
@@ -3054,27 +3097,28 @@ if (window.__quotexbotAbortInstalled) {
     return false;
   }
   function tradeWaitSec() {
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0 && !shortCountdownUncorroborated(cd)) return cd;
-    try { if (realTradeOpenNow()) return 1; } catch (_e2) {}
-    const last = lastOkJournal();
-    if (last && !last.result && (last.t || 0) >= bootAt) {
-      const dur = saneDurMs(last.durMs);
-      return Math.max(1, Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000));
+    const ev = liveOpenEvidence();
+    if (ev.rowCd != null && ev.rowCd > 2) return ev.rowCd;
+    if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
+    if (ev.reserved) {
+      const last = lastOkJournal();
+      if (last && !last.result && (last.t || 0) >= bootAt) {
+        const dur = saneDurMs(last.durMs);
+        const left = Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000);
+        if (left > 2) return left;
+      }
     }
-    return Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
+    return 0;
   }
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
-    if (realTradeOpenNow()) {
+    const ev = liveOpenEvidence();
+    const keep = (ev.rowCd != null && ev.rowCd > 2) || (ev.moneyCd != null && ev.moneyCd > 2) || ev.reserved;
+    if (keep) {
       staleBusyCleared = true;
       log("Boot: open trade on platform, keeping one-trade lock");
       return;
     }
-    let ready = false;
-    try { ready = !!readTimeWidgetValue(); } catch (_eU) {}
-    if (!ready && Date.now() - bootAt < 8000) return;
     staleBusyCleared = true;
     clickLock = false;
     lastClickAt = 0;
@@ -3632,7 +3676,7 @@ if (window.__quotexbotAbortInstalled) {
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
         <button class="dashbtn" type="button" data-act="dash">ড্যাশবোর্ড</button>
-        <p class="note">${state.lastReason || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"}</p>
+        <p class="note">${(function(){ try { if (realTradeOpenNow()) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (/wait\s*1s/i.test(r) || /trade open,\s*wait\s*[12]s/i.test(r)) r = ""; return r || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"; })()}</p>
         <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -3645,6 +3689,7 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   function onHudClick(ev) {
+    if (botSyntheticClick) return;
     const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
     if (!act) return;
     if (act === "mini") { state.minimized = true; saveState(state); render(); }
@@ -3679,6 +3724,7 @@ if (window.__quotexbotAbortInstalled) {
       return;
     }
     if (act === "auto") {
+      if (!ev || ev.isTrusted !== true) return;
       const snap = snapDoc();
       if (state.auto) {
         state.auto = false;
@@ -3687,10 +3733,11 @@ if (window.__quotexbotAbortInstalled) {
         state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
         log("লাইভ, অটো চালু হয়নি");
       } else {
+        /* state.auto = true ONLY here, from a real Start auto click. */
         state.auto = true;
         state.autoCount = 0;
         state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
-        log("অটো চালু — এই চার্টেই থাকবে");
+        log("Auto on — staying on this chart");
         scanWatchlist();
       }
       saveState(state); render();
@@ -3814,6 +3861,11 @@ if (window.__quotexbotAbortInstalled) {
     settlePendingJournal();
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
+    try {
+      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
+        state.lastReason = "";
+      }
+    } catch (_eW1) {}
     if (state.auto) scanWatchlist();
     else {
       const sig = String(state.lastPx) + "\0" + String(state.lastPair);
@@ -3914,6 +3966,11 @@ if (window.__quotexbotAbortInstalled) {
   setTimeout(function () {
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
+    try {
+      if (!realTradeOpenNow() && /wait\s*[12]s|trade open/i.test(String(state.lastReason || ""))) {
+        state.lastReason = "";
+      }
+    } catch (_eW1) {}
     if (state.auto) scanWatchlist();
   }, 600);
   } catch (err) {
