@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.10
+// @version      0.9.11
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -33,6 +33,7 @@
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
+// @all_frames   true
 // @run-at       document-end
 // ==/UserScript==
 
@@ -45,7 +46,15 @@
  */
 
 (function quotexbotLoader() {
-  if (window.top !== window) return;
+  function quotexbotShouldBoot() {
+    try {
+      const href = String((location && location.href) || "");
+      const w = window.innerWidth || 0, h = window.innerHeight || 0;
+      if (window.top === window) return w >= 400 && h >= 300;
+      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
+    } catch (_e) { return true; }
+  }
+  if (!quotexbotShouldBoot()) return;
   function verNewer(remote, local) {
     const a = String(remote).split(".").map(Number);
     const b = String(local).split(".").map(Number);
@@ -57,7 +66,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.10";
+  const FILE_VER = "0.9.11";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -92,7 +101,15 @@ if (window.__quotexbotAbortInstalled) {
 } else {
 (function (root) {
   "use strict";
-  if (window.top !== window) return;
+  function quotexbotShouldBoot() {
+    try {
+      const href = String((location && location.href) || "");
+      const w = window.innerWidth || 0, h = window.innerHeight || 0;
+      if (window.top === window) return w >= 400 && h >= 300;
+      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
+    } catch (_e) { return true; }
+  }
+  if (!quotexbotShouldBoot()) return;
 
   const UP_LABELS = new Set(
     [
@@ -531,7 +548,15 @@ if (window.__quotexbotAbortInstalled) {
 (function () {
   "use strict";
   try {
-  if (window.top !== window) return;
+  function quotexbotShouldBoot() {
+    try {
+      const href = String((location && location.href) || "");
+      const w = window.innerWidth || 0, h = window.innerHeight || 0;
+      if (window.top === window) return w >= 400 && h >= 300;
+      return w >= 700 && h >= 500 && /demo-trade|live-trade|\/trade/i.test(href);
+    } catch (_e) { return true; }
+  }
+  if (!quotexbotShouldBoot()) return;
   if (window.__quotexbotHudBoot) return;
   window.__quotexbotHudBoot = true;
 
@@ -539,7 +564,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.10",
+    version: "0.9.11",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.68,
@@ -630,6 +655,9 @@ if (window.__quotexbotAbortInstalled) {
     state.lastPair = "—";
     state.otcBars = {};
     state.pairStats = {};
+    state.hudWin = null;
+    state.dashWin = null;
+    state.minimized = false;
     try { saveState(state); } catch (_e) {}
   }
 
@@ -1732,6 +1760,20 @@ if (window.__quotexbotAbortInstalled) {
     if (!el) return;
     const w = winBox(which);
     if (!w) return;
+    const left = w.left;
+    const top = w.top;
+    const off =
+      (left != null && (left < 0 || left > window.innerWidth - 60)) ||
+      (top != null && (top < 0 || top > window.innerHeight - 40));
+    if (off) {
+      if (which === "hud") {
+        el.style.left = "12px";
+        el.style.bottom = "12px";
+        el.style.top = "auto";
+        el.style.right = "auto";
+      }
+      return;
+    }
     if (w.left != null) {
       el.style.left = w.left + "px";
       el.style.right = "auto";
@@ -1832,6 +1874,15 @@ if (window.__quotexbotAbortInstalled) {
     el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
     (document.body || document.documentElement).appendChild(el);
     applyWin(el, "hud");
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.left < 0 || r.left > window.innerWidth - 60 || r.top < 0 || r.top > window.innerHeight - 40) {
+        el.style.left = "12px";
+        el.style.bottom = "12px";
+        el.style.top = "auto";
+        el.style.right = "auto";
+      }
+    } catch (_e) {}
     return el;
   }
 
@@ -2086,7 +2137,7 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   function checkRemoteVersion() {
-    if (window.top !== window) return;
+    if (!quotexbotShouldBoot()) return;
     if (window.__quotexbotReloading) return;
     const url = CONFIG.updateUrl;
     if (!url) return;
