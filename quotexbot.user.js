@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.8
+// @version      0.8.9
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.8";
+  const FILE_VER = "0.8.9";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.8",
+    version: "0.8.9",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -696,8 +696,10 @@ if (window.__quotexbotAbortInstalled) {
       if (hud && (el === hud || hud.contains(el))) continue;
       let raw = "";
       try { raw = (el.innerText || el.textContent || ""); } catch (_e3) { continue; }
+      if (/[+\u2212$]|\$/.test(raw)) continue;
       raw = raw.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
       if (!raw || raw.length > 24) continue;
+      if (/^[+\-]/.test(raw) || /\$/.test(raw)) continue;
       re.lastIndex = 0;
       let m;
       while ((m = re.exec(raw))) {
@@ -760,18 +762,20 @@ if (window.__quotexbotAbortInstalled) {
       const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
-      let t = "";
-      try {
-        t = (el.innerText || el.textContent || "").replace(/[\s\u00a0]/g, "").replace(/,/g, "");
-      } catch (_e) { continue; }
+      let rawT = "";
+      try { rawT = (el.innerText || el.textContent || ""); } catch (_e) { continue; }
+      if (/[+\u2212$€]|\u0024/.test(rawT)) continue;
+      let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
       if (!t || t.length > 28) continue;
-      const m = t.match(/(\d{1,6}\.\d{2,6})/);
+      if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
+      const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
       if (!m) continue;
       const v = parseFloat(m[1]);
       if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
-      if (!r || r.left < leftMin || r.width < 4 || r.height < 4) continue;
+      const leftMax = wide * 0.86;
+      if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
       if (r.top < 70 || r.top > (window.innerHeight || 800) * 0.92) continue;
       let font = 12;
       let bg = "";
@@ -830,23 +834,18 @@ if (window.__quotexbotAbortInstalled) {
       if (isFrozenQuote(v) && pool.some(function (x) { return x !== v && !isFrozenQuote(x); })) return false;
       return true;
     }
-    if (axis && axis.v != null && usable(axis.v)) {
-      if (!range || (axis.v >= range.lo && axis.v <= range.hi) || range.hi >= 1000) {
-        if (pairLabel) {
-          if (!state.learnedRange || typeof state.learnedRange !== "object") state.learnedRange = {};
-          const pad = Math.max(axis.v * 0.35, 1);
-          state.learnedRange[pairLabel] = { lo: Math.max(0.01, axis.v - pad), hi: axis.v + pad };
-        }
-        return axis.v;
+    if (axis && axis.v != null && usable(axis.v) && axis.v >= range.lo && axis.v <= range.hi) {
+      if (pairLabel) {
+        if (!state.learnedRange || typeof state.learnedRange !== "object") state.learnedRange = {};
+        const pad = Math.max(axis.v * 0.35, axis.v * 0.02 + 0.01);
+        state.learnedRange[pairLabel] = { lo: Math.max(0.01, axis.v - pad), hi: axis.v + pad };
       }
+      return axis.v;
     }
     const hit = all.filter(function (c) {
       return c.v >= range.lo && c.v <= range.hi && usable(c.v);
     });
-    if (!hit.length) {
-      const unfrozen = pool.filter(function (v) { return usable(v); });
-      return unfrozen.length ? unfrozen[0] : null;
-    }
+    if (!hit.length) return null;
     hit.sort(function (a, b) {
       return (b.x - a.x) || (b.font - a.font) || (b.area - a.area);
     });
@@ -1251,8 +1250,8 @@ if (window.__quotexbotAbortInstalled) {
 
       state.lastPair = p.label;
       state.lastSignal = "…";
-      state.lastReason = "এক চার্ট: " + p.label;
-      log("সুইচ নাই · এই চার্ট: " + p.label);
+      state.lastReason = "খোলা চার্ট: " + p.label;
+      log("এক চার্টে থাকছি: " + p.label);
       saveState(state); render();
 
       log("OTC চার্টের দাম পড়ছি: " + p.label);
