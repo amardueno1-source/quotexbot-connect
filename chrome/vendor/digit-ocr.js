@@ -1,5 +1,5 @@
 /**
- * Chart-axis live-tag crop helper (v0.9.38-ext).
+ * Chart-axis live-tag crop helper (v0.9.39-ext).
  * Crops the canvas-right blue/cyan live-price blob and upscales 3x.
  * Primary OCR is Tesseract.js in the offscreen document — this file is
  * NOT the recognizer. Homemade glyph matching is kept but unused.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.38
+// @version      0.9.39
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -600,7 +600,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.38",
+    version: "0.9.39",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -673,6 +673,10 @@ if (window.__quotexbotAbortInstalled) {
   let topHudYielded = false;
   let lastMissLogAt = 0;
   let lastMissSig = "";
+  let cdLowHoldAt = 0;
+  let cdGhost1At = 0;
+  let cdGhostLogged = false;
+  let lastWaitLogSig = "";
 
   function loadState() {
     try {
@@ -2545,12 +2549,79 @@ if (window.__quotexbotAbortInstalled) {
         if (bestMoney == null || got < bestMoney) bestMoney = got;
       }
     }
-    if (bestMoney != null) return bestMoney;
+    if (bestMoney != null) return decayShortCountdown(bestMoney);
     try {
       const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 0) return rowCd;
+      if (rowCd != null && rowCd > 0) return decayShortCountdown(rowCd);
     } catch (_eR) {}
-    return null;
+    return decayShortCountdown(null);
+  }
+  function clearCountdownGhost1() {
+    cdLowHoldAt = 0;
+    cdGhost1At = 0;
+    if (!cdGhostLogged) {
+      cdGhostLogged = true;
+      log("Countdown ghost 1s cleared");
+    }
+  }
+  function decayShortCountdown(raw) {
+    const now = Date.now();
+    if (raw == null || !isFinite(raw) || raw <= 0) {
+      cdLowHoldAt = 0;
+      cdGhost1At = 0;
+      return null;
+    }
+    const n = Math.round(Number(raw));
+    if (n >= 1 && n <= 2) {
+      if (!cdLowHoldAt) cdLowHoldAt = now;
+      const wall = (now - cdLowHoldAt) / 1000;
+      if (n === 1) {
+        if (!cdGhost1At) cdGhost1At = now;
+        if (now - cdGhost1At >= 4000) {
+          clearCountdownGhost1();
+          return null;
+        }
+      } else {
+        cdGhost1At = 0;
+      }
+      if (wall >= 2) return null;
+      const left = n - wall;
+      if (left < 1) return null;
+      return Math.floor(left);
+    }
+    cdLowHoldAt = 0;
+    cdGhost1At = 0;
+    cdGhostLogged = false;
+    return n;
+  }
+  function hasOpenTradesListRow() {
+    try {
+      const rows = listTradeRows();
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i] && rows[i].open) return true;
+      }
+    } catch (_e0) {}
+    try {
+      const rowCd = tradesListCountdownSec();
+      if (rowCd != null && rowCd > 0) return true;
+    } catch (_e1) {}
+    return false;
+  }
+  function balanceIsReserved() {
+    const last = lastOkJournal();
+    if (!(last && last.ok && !last.result && (last.t || 0) >= bootAt)) return false;
+    const stake = Number(last.stake) || Number(lastPreClickStake) || 0;
+    const pre = Number(last.bal);
+    let bal = null;
+    try { bal = readPlatformBalance(); } catch (_e) { bal = null; }
+    if (!(stake >= 1) || !isFinite(pre) || pre < 1 || bal == null) return false;
+    return bal <= pre - Math.max(0.5, stake * 0.4);
+  }
+  function shortCountdownUncorroborated(cd) {
+    if (cd == null || cd <= 0 || cd > 2) return false;
+    if (hasOpenTradesListRow()) return false;
+    if (balanceIsReserved()) return false;
+    return true;
   }
   function pnlAlreadyUsed(used, n) {
     if (used[String(n)]) return true;
@@ -2928,12 +2999,16 @@ if (window.__quotexbotAbortInstalled) {
   function realTradeOpenNow() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0) return true;
-    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
     try {
       const rowCd = tradesListCountdownSec();
       if (rowCd != null && rowCd > 0) return true;
     } catch (_e3) {}
+    if (hasOpenTradesListRow()) return true;
+    if (balanceIsReserved()) return true;
+    const ghostShort = (cd == null || cd <= 2) && !hasOpenTradesListRow() && !balanceIsReserved();
+    if (ghostShort) return false;
+    if (cd != null && cd > 0) return true;
+    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
     return false;
   }
   function pendingJournal() {
@@ -2972,13 +3047,16 @@ if (window.__quotexbotAbortInstalled) {
   function expiryTooClose() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) { cd = null; }
-    if (cd != null && cd > 0 && cd <= 8) return true;
+    if (cd != null && cd > 0 && cd <= 8) {
+      if (cd <= 2 && shortCountdownUncorroborated(cd)) return false;
+      return true;
+    }
     return false;
   }
   function tradeWaitSec() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0) return cd;
+    if (cd != null && cd > 0 && !shortCountdownUncorroborated(cd)) return cd;
     try { if (realTradeOpenNow()) return 1; } catch (_e2) {}
     const last = lastOkJournal();
     if (last && !last.result && (last.t || 0) >= bootAt) {
@@ -3112,10 +3190,15 @@ if (window.__quotexbotAbortInstalled) {
       if (tradeOpen()) {
         const left = tradeWaitSec();
         state.lastReason = "Trade open, wait " + left + "s";
-        log("Waiting on last trade/cooldown " + left + "s");
+        const sig = "wait:" + String(left);
+        if (sig !== lastWaitLogSig) {
+          lastWaitLogSig = sig;
+          log("Waiting on last trade/cooldown " + left + "s");
+        }
         saveState(state); render();
         return;
       }
+      lastWaitLogSig = "";
 
       const vis = visiblePair();
       const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;

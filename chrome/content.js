@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.38-ext)
+ * quotexbot Chrome MV3 content script (v0.9.39-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -518,7 +518,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.38-ext",
+    version: "0.9.39-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -596,7 +596,11 @@
   let lastMissLogAt = 0;
   let lastMissSig = "";
   let lastCanvasOcr = { v: null, at: 0 };
-  let lastCanvasCd = { sec: null, at: 0, text: "", money: false };
+  let lastCanvasCd = { sec: null, at: 0, text: "", money: false, holdAt: 0 };
+  let cdLowHoldAt = 0;
+  let cdGhost1At = 0;
+  let cdGhostLogged = false;
+  let lastWaitLogSig = "";
   let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
@@ -2877,17 +2881,33 @@
   }
   function canvasCountdownSec() {
     if (lastCanvasCd.sec == null || !lastCanvasCd.at) return null;
-    const elapsed = (Date.now() - lastCanvasCd.at) / 1000;
+    const raw = Number(lastCanvasCd.sec);
+    if (!isFinite(raw) || raw <= 0) return null;
+    const now = Date.now();
+    const holdAt = lastCanvasCd.holdAt || lastCanvasCd.at;
+    const elapsed = (now - lastCanvasCd.at) / 1000;
+    const holdElapsed = (now - holdAt) / 1000;
+    /* 1–2s OCR: do not keep the 6s hold. After 2s wall, expired. */
+    if (raw <= 2) {
+      if (holdElapsed >= 2) return null;
+      const left = raw - elapsed;
+      if (!isFinite(left) || left < 1) return null;
+      return Math.floor(left);
+    }
     if (elapsed > 6) return null;
-    const left = Math.round(Number(lastCanvasCd.sec) - elapsed);
-    if (!isFinite(left) || left <= 0) return null;
-    return left;
+    const left = raw - elapsed;
+    if (!isFinite(left) || left < 1) return null;
+    return Math.round(left);
   }
   function canvasDollarBubbleOpen() {
     if (!lastCanvasCd.at || !lastCanvasCd.money) return false;
     if (Date.now() - lastCanvasCd.at > 4000) return false;
-    if (canvasCountdownSec() != null) return true;
-    return Date.now() - lastCanvasCd.at < 2500;
+    const cv = canvasCountdownSec();
+    if (cv != null && cv > 2) return true;
+    if (cv != null && cv > 0) {
+      return Date.now() - (lastCanvasCd.holdAt || lastCanvasCd.at) < 2000;
+    }
+    return Number(lastCanvasCd.sec) > 2 && Date.now() - lastCanvasCd.at < 2500;
   }
   function domCountdownSec() {
     const hud = document.getElementById("quotexbot-hud");
@@ -2940,14 +2960,85 @@
     /* Do not use bare 00:SS — that is the candle timer, not the $ trade bubble. */
     return null;
   }
+  function clearCountdownGhost1() {
+    lastCanvasCd = { sec: null, at: 0, text: "", money: false, holdAt: 0 };
+    cdLowHoldAt = 0;
+    cdGhost1At = 0;
+    if (!cdGhostLogged) {
+      cdGhostLogged = true;
+      log("Countdown ghost 1s cleared");
+    }
+  }
+  function decayShortCountdown(raw) {
+    const now = Date.now();
+    if (raw == null || !isFinite(raw) || raw <= 0) {
+      cdLowHoldAt = 0;
+      cdGhost1At = 0;
+      return null;
+    }
+    const n = Math.round(Number(raw));
+    if (n >= 1 && n <= 2) {
+      if (!cdLowHoldAt) cdLowHoldAt = now;
+      const wall = (now - cdLowHoldAt) / 1000;
+      if (n === 1) {
+        if (!cdGhost1At) cdGhost1At = now;
+        if (now - cdGhost1At >= 4000) {
+          clearCountdownGhost1();
+          return null;
+        }
+      } else {
+        cdGhost1At = 0;
+      }
+      if (wall >= 2) return null;
+      const left = n - wall;
+      if (left < 1) return null;
+      return Math.floor(left);
+    }
+    cdLowHoldAt = 0;
+    cdGhost1At = 0;
+    cdGhostLogged = false;
+    return n;
+  }
+  function hasOpenTradesListRow() {
+    try {
+      const rows = listTradeRows();
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i] && rows[i].open) return true;
+      }
+    } catch (_e0) {}
+    try {
+      const rowCd = tradesListCountdownSec();
+      if (rowCd != null && rowCd > 0) return true;
+    } catch (_e1) {}
+    return false;
+  }
+  function balanceIsReserved() {
+    const last = lastOkJournal();
+    if (!(last && last.ok && !last.result && (last.t || 0) >= bootAt)) return false;
+    const stake = Number(last.stake) || Number(lastPreClickStake) || 0;
+    const pre = Number(last.bal);
+    let bal = null;
+    try { bal = readPlatformBalance(); } catch (_e) { bal = null; }
+    if (!(stake >= 1) || !isFinite(pre) || pre < 1 || bal == null) return false;
+    return bal <= pre - Math.max(0.5, stake * 0.4);
+  }
+  function shortCountdownUncorroborated(cd) {
+    if (cd == null || cd <= 0 || cd > 2) return false;
+    if (hasOpenTradesListRow()) return false;
+    if (balanceIsReserved()) return false;
+    return true;
+  }
   function screenCountdownSec() {
     let dom = null;
     try { dom = domCountdownSec(); } catch (_e0) { dom = null; }
-    if (dom != null && dom > 0) return dom;
+    if (dom != null && dom > 0) return decayShortCountdown(dom);
     let cv = null;
     try { cv = canvasCountdownSec(); } catch (_e1) { cv = null; }
-    if (cv != null && cv > 0) return cv;
-    return null;
+    if (cv != null && cv > 0) return decayShortCountdown(cv);
+    if (lastCanvasCd.sec != null && Number(lastCanvasCd.sec) >= 1 && Number(lastCanvasCd.sec) <= 2 && lastCanvasCd.at) {
+      return decayShortCountdown(1);
+    }
+    return decayShortCountdown(null);
   }
   function pnlAlreadyUsed(used, n) {
     if (used[String(n)]) return true;
@@ -3325,13 +3416,17 @@
   function realTradeOpenNow() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0) return true;
-    try { if (canvasDollarBubbleOpen()) return true; } catch (_e1) {}
-    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
     try {
       const rowCd = tradesListCountdownSec();
       if (rowCd != null && rowCd > 0) return true;
     } catch (_e3) {}
+    if (hasOpenTradesListRow()) return true;
+    if (balanceIsReserved()) return true;
+    const ghostShort = (cd == null || cd <= 2) && !hasOpenTradesListRow() && !balanceIsReserved();
+    if (ghostShort) return false;
+    if (cd != null && cd > 0) return true;
+    try { if (canvasDollarBubbleOpen()) return true; } catch (_e1) {}
+    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
     return false;
   }
   function pendingJournal() {
@@ -3383,20 +3478,24 @@
   function expiryTooClose() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) { cd = null; }
-    if (cd != null && cd > 0 && cd <= 8) return true;
+    if (cd != null && cd > 0 && cd <= 8) {
+      if (cd <= 2 && shortCountdownUncorroborated(cd)) return false;
+      return true;
+    }
     return false;
   }
   function tradeWaitSec() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0) return cd;
+    if (cd != null && cd > 0 && !shortCountdownUncorroborated(cd)) return cd;
     try { if (realTradeOpenNow()) return 1; } catch (_e2) {}
     const last = lastOkJournal();
     if (last && !last.result && (last.t || 0) >= bootAt) {
       const dur = saneDurMs(last.durMs);
       return Math.max(1, Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000));
     }
-    return Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
+    const cool = Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
+    return cool;
   }
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
@@ -3523,10 +3622,15 @@
       if (tradeOpen()) {
         const left = tradeWaitSec();
         state.lastReason = "Trade open, wait " + left + "s";
-        log("Waiting on last trade/cooldown " + left + "s");
+        const sig = "wait:" + String(left);
+        if (sig !== lastWaitLogSig) {
+          lastWaitLogSig = sig;
+          log("Waiting on last trade/cooldown " + left + "s");
+        }
         saveState(state); render();
         return;
       }
+      lastWaitLogSig = "";
       try {
         if (expiryTooClose()) {
           state.lastReason = "Trade open, wait " + tradeWaitSec() + "s";
@@ -4182,11 +4286,21 @@
           try { err = chrome.runtime.lastError; } catch (_e0) {}
           const at = Number(resp && resp.capturedAt) || Date.now();
           if (resp && resp.cdSec != null && Number(resp.cdSec) > 0) {
+            const sec = Number(resp.cdSec);
+            const prev = lastCanvasCd || {};
+            const prevSec = Number(prev.sec);
+            let storeAt = at;
+            let holdAt = at;
+            if (sec <= 2 && prevSec >= 1 && prevSec <= 2) {
+              storeAt = prev.at || at;
+              holdAt = prev.holdAt || prev.at || at;
+            }
             lastCanvasCd = {
-              sec: Number(resp.cdSec),
-              at: at,
+              sec: sec,
+              at: storeAt,
               text: resp.cdText ? String(resp.cdText) : "",
-              money: !!resp.cdMoney
+              money: !!resp.cdMoney,
+              holdAt: holdAt
             };
           }
           if (err || !resp || !resp.ok || resp.v == null) {
