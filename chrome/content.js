@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.16-ext)
+ * quotexbot Chrome MV3 content script (v0.9.17-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.16-ext",
+    version: "0.9.17-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -520,6 +520,7 @@
       "USD/BRL": [3, 9],
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
+      "NZD/USD": [0.40, 0.90],
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
     },
@@ -575,8 +576,12 @@
     state.hudWin = null;
     state.dashWin = null;
     state.minimized = false;
+    state.lastPx = "—";
+    state.lastGoodPx = null;
     try { saveState(state); } catch (_e) {}
   }
+  state.lastPx = "—";
+  state.lastGoodPx = null;
 
   function log(msg) {
     const now = new Date();
@@ -976,15 +981,17 @@
     if (hud && (el === hud || hud.contains(el))) return true;
     if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
     const listRe = /asset|currencies|most traded|search/i;
+    const priceNowRe = /price\s*now/i;
     const wide = window.innerWidth || 1200;
     const high = window.innerHeight || 800;
     let cur = el;
     for (let d = 0; d < 8 && cur && cur !== document.body && cur !== document.documentElement; d++) {
       try {
+        let t = "";
+        try { t = String(cur.innerText || "").slice(0, 1500); } catch (_eT) {}
+        if (t && priceNowRe.test(t)) return false;
         const r = cur.getBoundingClientRect();
         if (r && r.width >= 160 && r.height >= 160 && r.width <= wide * 0.58 && r.height <= high * 0.92) {
-          let t = "";
-          try { t = String(cur.innerText || "").slice(0, 1500); } catch (_eT) {}
           if (t && listRe.test(t)) return true;
           let inp = null;
           try { inp = cur.querySelector && cur.querySelector("input"); } catch (_eI) {}
@@ -1029,11 +1036,7 @@
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
     const strongRe = /price\s*now/i;
-    const weakRe = /current\s*price|цена/i;
-    const looseRe = /price/i;
-    const exactRe = /^(\d{1,6}\.\d{2,6})$/;
     let preferred = null;
-    let fallback = null;
     function consider(el) {
       if (preferred) return;
       if (hud && (el === hud || hud.contains(el))) return;
@@ -1043,40 +1046,33 @@
       const rawT = nodeText(el);
       if (!rawT) return;
       if (/\b\d{1,2}\s*min\b/i.test(rawT) && !strongRe.test(rawT) && rawT.length < 24) return;
-      const strongHere = strongRe.test(rawT);
-      const strongNear = !strongHere && nearbyHas(el, strongRe, 1);
-      if (strongHere || strongNear) {
-        let v = parsePriceNowNumber(rawT);
-        if (v == null && strongHere) {
-          try {
-            if (el.nextElementSibling) v = parsePriceNowNumber(nodeText(el.nextElementSibling));
-            if (v == null && el.previousElementSibling) v = parsePriceNowNumber(nodeText(el.previousElementSibling));
-            if (v == null && el.parentElement) v = parsePriceNowNumber(nodeText(el.parentElement));
-          } catch (_e1) {}
-        }
-        if (v != null) {
-          preferred = { v: v, el: resolvePriceNowEl(el, v) };
-          return;
-        }
+      if (!strongRe.test(rawT)) return;
+      let v = parsePriceNowNumber(rawT);
+      if (v == null) {
+        try {
+          if (el.nextElementSibling) v = parsePriceNowNumber(nodeText(el.nextElementSibling));
+          if (v == null && el.previousElementSibling) v = parsePriceNowNumber(nodeText(el.previousElementSibling));
+          if (v == null && el.parentElement) v = parsePriceNowNumber(nodeText(el.parentElement));
+        } catch (_e1) {}
       }
-      if (fallback) return;
-      const weakHere = weakRe.test(rawT) || nearbyHas(el, weakRe, 1);
-      const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
-      if (stripped.length <= 16 && exactRe.test(stripped) && (weakHere || nearbyHas(el, looseRe, 2))) {
-        const v = parseFloat(stripped);
-        if (isFinite(v) && v >= 0.4 && v < 1000000) fallback = { v: v, el: resolvePriceNowEl(el, v) };
-      }
+      if (v != null) preferred = { v: v, el: resolvePriceNowEl(el, v) };
     }
+    /* Dedicated pass: ONLY "Price Now" labels, no SCAN_MAX. Text prefilter before rect. */
     forEachRoot(function (root) {
       if (preferred) return;
       try {
-        const list = root.querySelectorAll("span, div, b, strong, label, em, p, td, li, h1, h2, h3, h4");
-        const nAll = list.length;
-        const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
-        for (let i = nAll - 1; i >= start; i--) consider(list[i]);
+        const list = root.querySelectorAll("span,div,b,strong,label,em,p,td,li");
+        for (let i = 0; i < list.length; i++) {
+          if (preferred) return;
+          const el = list[i];
+          let raw = "";
+          try { raw = String(el.textContent || ""); } catch (_eT) { continue; }
+          if (!raw || raw.length >= 120 || !strongRe.test(raw)) continue;
+          consider(el);
+        }
       } catch (_e0) {}
     });
-    return preferred || fallback;
+    return preferred;
   }
 
   function findChartPairLabelEl() {
@@ -1113,16 +1109,26 @@
     forEachRoot(function (root) {
       try {
         const nodes = root.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p, label");
-        const nAll = nodes.length;
-        const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
-        for (let n = start; n < nAll; n++) consider(nodes[n]);
+        for (let n = 0; n < nodes.length; n++) {
+          const el = nodes[n];
+          let raw = "";
+          try { raw = String(el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+          if (!raw || raw.length > 48) continue;
+          if (!pairRe.test(raw) && labelFromText(raw) !== want) continue;
+          consider(el);
+        }
       } catch (_e0) {}
     });
     return best;
   }
 
   function ensurePairInfoOpen() {
-    if (readPriceNow()) return;
+    const pair = lastSeenPair || visiblePair();
+    const pn = readPriceNow();
+    if (pn && pair) {
+      const range = priceRange(pair);
+      if (pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) return;
+    }
     const now = Date.now();
     if (now - lastPairInfoClickAt < 2500) return;
     const pairEl = findChartPairLabelEl();
@@ -1144,7 +1150,7 @@
       try { inner = String(el.innerText || ""); } catch (_eT) {}
       if (reloadRe.test(inner)) return;
       const tag = String(el.tagName || "").toLowerCase();
-      if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a") return;
+      if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a" && tag !== "div") return;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e1) { return; }
       if (!r || r.width < 4 || r.height < 4) return;
@@ -1167,7 +1173,7 @@
       if (tag === "button" || role === "button" || tag === "a") score += 12;
       if (tag === "svg" || tag === "i") score += 10;
       if (Math.abs(r.width - r.height) < 8 && r.width <= 28) score += 16;
-      if (r.right <= pairRect.left + 6) score += 24;
+      if (r.right <= pairRect.left + 8 && r.left < pairRect.left + 2) score += 40;
       if (score <= 0) return;
       found.push({ el: el, score: score });
     }
@@ -1176,9 +1182,9 @@
       const p = scope.parentElement;
       if (!p) break;
       try {
-        const kids = p.querySelectorAll("button, svg, span, i, a");
+        const kids = p.querySelectorAll("button, svg, span, i, a, div");
         const nAll = kids.length;
-        const nMax = Math.min(nAll, 80);
+        const nMax = Math.min(nAll, 200);
         for (let i = 0; i < nMax; i++) consider(kids[i]);
       } catch (_e3) {}
       scope = p;
@@ -1250,17 +1256,6 @@
   function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
     const range = priceRange(pairLabel);
-    let pn = readPriceNow();
-    if (!pn) {
-      ensurePairInfoOpen();
-      pn = readPriceNow();
-    }
-    const axis = readAxisLivePrice();
-    const all = scrapeQuoteCandidates(pairLabel);
-    if (diag) {
-      diag.axis = lastAxisScanN;
-      diag.cand = all.length;
-    }
     function ok(v) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
@@ -1268,48 +1263,40 @@
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
       return true;
     }
+    let pn = readPriceNow();
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
       bindLivePriceObserver(pn.el);
     }
-    rememberQuotes([axis && axis.v, pn && pn.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
     if (pn && ok(pn.v)) {
+      rememberQuotes([pn.v]);
       state.lastGoodPx = pn.v;
+      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
       return pn.v;
     }
-    const axisOk = !!(axis && ok(axis.v));
-    const cands = [];
-    if (axisOk) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
-    for (let i = 0; i < all.length; i++) {
-      if (ok(all[i].v)) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
+    ensurePairInfoOpen();
+    pn = readPriceNow();
+    if (pn && pn.el) {
+      lastPriceNowEl = pn.el;
+      bindLivePriceObserver(pn.el);
     }
-    if (!cands.length) return null;
-    let axisCand = null;
-    for (let i = 0; i < cands.length; i++) {
-      if (cands[i].axis) { axisCand = cands[i]; break; }
+    if (pn && ok(pn.v)) {
+      rememberQuotes([pn.v]);
+      state.lastGoodPx = pn.v;
+      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
+      return pn.v;
     }
-    if (axisCand && state.lastGoodPx != null) {
-      const rel = Math.abs(axisCand.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6);
-      if (rel > 0.04) {
-        state.lastGoodPx = axisCand.v;
-        return axisCand.v;
-      }
+    const axis = readAxisLivePrice();
+    if (diag) {
+      diag.axis = lastAxisScanN;
+      diag.cand = 0;
     }
-    if (lastSeenPair === pairLabel && state.lastGoodPx != null) {
-      const near = cands.filter(function (c) {
-        return Math.abs(c.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6) < 0.025;
-      });
-      if (near.length) {
-        near.sort(function (a, b) { return (b.axis - a.axis) || (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell); });
-        state.lastGoodPx = near[0].v;
-        return near[0].v;
-      }
+    if (axis && ok(axis.v) && axis.el && !inMarketList(axis.el)) {
+      rememberQuotes([axis.v]);
+      state.lastGoodPx = axis.v;
+      return axis.v;
     }
-    cands.sort(function (a, b) {
-      return (b.axis - a.axis) || (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (b.x - a.x);
-    });
-    state.lastGoodPx = cands[0].v;
-    return cands[0].v;
+    return null;
   }
 
   function peekQuotes(pairLabel) {
@@ -2430,10 +2417,12 @@
     const px = readLivePrice(label, miss);
     if (px == null) {
       state.lastPx = "—";
+      lastObservedPx = null;
       if (root && root.isConnected) {
         const row = root.querySelectorAll(".row b")[3];
         if (row) row.textContent = "—";
       }
+      ensurePairInfoOpen();
       const sig = "OTC miss · axis" + miss.axis + " cand" + miss.cand;
       const now = Date.now();
       if (sig !== lastMissSig || now - lastMissLogAt > 4000) {
