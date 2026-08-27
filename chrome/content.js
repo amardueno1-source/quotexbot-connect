@@ -1,11 +1,14 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.44-ext)
+ * quotexbot Chrome MV3 content script (v0.9.45-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
- * Live price: if div.XfvzC "Pair Information" is already open, read Price Now
- * from the popup DOM and skip the screenshot. Never click that heading.
+ * Live price: Price Now first (Pair Information panel quote, not only a node
+ * whose own text is "Price Now"). If that yields a finite v in the pair range,
+ * skip screenshot. If div.XfvzC / Pair Information looks open but Price Now
+ * has no number, do not return null — fall through to canvas OCR and the cyan
+ * last-price tag. Never click the XfvzC heading.
  * When the popup is closed, click ONLY svg.icon-pair-information (or its
  * nearest small button) on the RIGHT trade panel next to the ACTIVE pair.
  * Never click the pair name, header tabs, asset list, search, leftover chips,
@@ -550,7 +553,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.44-ext",
+    version: "0.9.45-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1440,6 +1443,109 @@
     return el;
   }
 
+  /* Walk Pair Information panel (div.XfvzC / heading) for a quote. Never click it. */
+  function readPairInfoPanelQuote() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let heading = null;
+    function considerHeading(el) {
+      if (heading || !el) return;
+      if (hud && (el === hud || hud.contains(el))) return;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) return;
+      if (skipHudDashEl(el)) return;
+      if (!isVisibleNode(el)) return;
+      heading = el;
+    }
+    forEachRoot(function (root) {
+      if (heading || !root || !root.querySelectorAll) return;
+      try {
+        const byClass = root.querySelectorAll("div.XfvzC, .XfvzC");
+        for (let i = 0; i < byClass.length && !heading; i++) considerHeading(byClass[i]);
+      } catch (_e0) {}
+      if (heading) return;
+      try {
+        const list = root.querySelectorAll("div, h1, h2, h3, h4, span");
+        const nMax = Math.min(list.length, 400);
+        for (let i = 0; i < nMax && !heading; i++) {
+          const el = list[i];
+          let t = "";
+          try { t = String(el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+          if (!/pair\s*information/i.test(t) || t.length > 80) continue;
+          considerHeading(el);
+        }
+      } catch (_e1) {}
+    });
+    if (!heading) return null;
+    let panel = heading;
+    let bestPanel = heading;
+    const wide = window.innerWidth || 1200;
+    for (let u = 0; u < 8 && panel; u++) {
+      try {
+        const r = panel.getBoundingClientRect();
+        const tlen = String(panel.textContent || "").length;
+        if (r && r.width >= 80 && r.height >= 24 && tlen < 8000 && tlen > 0) {
+          bestPanel = panel;
+          const body = String(panel.innerText || panel.textContent || "");
+          if (r.width >= 140 && r.height >= 48 && r.width < wide * 0.7 &&
+              (/price\s*now/i.test(body) || /\d\.\d{4,6}/.test(body))) {
+            break;
+          }
+        }
+      } catch (_eU) {}
+      panel = panel.parentElement;
+    }
+    const pairLab = (typeof visiblePair === "function" ? visiblePair() : null) || lastSeenPair || (state && state.lastPair) || "";
+    const range = priceRange(pairLab);
+    const re = /(\d{1,6}\.\d{1,6})/g;
+    const cands = [];
+    function considerNum(str, el) {
+      if (!str) return;
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(str))) {
+        const i = m.index, e = i + m[1].length;
+        const before = str.slice(Math.max(0, i - 8), i);
+        const after = str.slice(e, e + 8);
+        if (/[%$€]/.test(after) || /[%$€+]/.test(before)) continue;
+        if (/[+\-]/.test(str.charAt(i - 1) || "")) continue;
+        if (/payout/i.test(before) || /payout/i.test(after)) continue;
+        if (/^\s*%/.test(after) || /^\s*\$/.test(after)) continue;
+        const dp = m[1].split(".")[1].length;
+        const v = parseFloat(m[1]);
+        if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
+        cands.push({ v: v, dp: dp, el: el || bestPanel, text: m[1] });
+      }
+    }
+    try { considerNum(String(bestPanel.innerText || bestPanel.textContent || ""), bestPanel); } catch (_eT0) {}
+    try {
+      const kids = bestPanel.querySelectorAll("span, div, b, strong, em, label, p, td");
+      const nMax = Math.min(kids.length, 100);
+      for (let i = 0; i < nMax; i++) {
+        const el = kids[i];
+        if (hud && (el === hud || hud.contains(el))) continue;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+        let t = "";
+        try { t = String(el.innerText || el.textContent || ""); } catch (_eK) { continue; }
+        if (!t || t.length > 96) continue;
+        considerNum(t, el);
+      }
+    } catch (_eK2) {}
+    if (!cands.length) return null;
+    function score(c) {
+      let sc = 0;
+      if (c.dp >= 4 && c.dp <= 6) sc += 50;
+      else if (c.dp === 3) sc += 8;
+      if (c.v >= range.lo && c.v <= range.hi) sc += 80;
+      if (c.v >= 0.9 && c.v <= 1.25 && c.dp >= 4) sc += 20;
+      return sc;
+    }
+    cands.sort(function (a, b) { return score(b) - score(a); });
+    const best = cands[0];
+    if (!best || !isFinite(best.v)) return null;
+    if (!(best.v >= range.lo && best.v <= range.hi)) return null;
+    return { v: best.v, el: resolvePriceNowEl(best.el, best.v), text: best.text, decimals: best.dp };
+  }
+
   /* PAIR INFORMATION modal: "Price Now" ticks in the center, not on the right axis. */
   function readPriceNow() {
     const hud = document.getElementById("quotexbot-hud");
@@ -1459,14 +1565,32 @@
       if (!strongRe.test(rawT)) return;
       sawLabel = true;
       let v = parsePriceNowNumber(rawT);
+      let src = rawT;
       if (v == null) {
         try {
-          if (el.nextElementSibling) v = parsePriceNowNumber(nodeText(el.nextElementSibling));
-          if (v == null && el.previousElementSibling) v = parsePriceNowNumber(nodeText(el.previousElementSibling));
-          if (v == null && el.parentElement) v = parsePriceNowNumber(nodeText(el.parentElement));
+          if (el.nextElementSibling) {
+            src = nodeText(el.nextElementSibling);
+            v = parsePriceNowNumber(src);
+          }
+          if (v == null && el.previousElementSibling) {
+            src = nodeText(el.previousElementSibling);
+            v = parsePriceNowNumber(src);
+          }
+          if (v == null && el.parentElement) {
+            src = nodeText(el.parentElement);
+            v = parsePriceNowNumber(src);
+          }
         } catch (_e1) {}
       }
-      if (v != null) preferred = { v: v, el: resolvePriceNowEl(el, v) };
+      if (v != null) {
+        const dm = String(src || rawT).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
+        preferred = {
+          v: v,
+          el: resolvePriceNowEl(el, v),
+          text: dm ? dm[0] : String(v),
+          decimals: dm ? dm[1].length : null
+        };
+      }
     }
     /* Dedicated pass: ONLY "Price Now" labels, no SCAN_MAX. Text prefilter before rect. */
     forEachRoot(function (root) {
@@ -1483,6 +1607,12 @@
         }
       } catch (_e0) {}
     });
+    if (!preferred) {
+      try {
+        const panel = readPairInfoPanelQuote();
+        if (panel && panel.v != null && isFinite(panel.v)) preferred = panel;
+      } catch (_ePanel) {}
+    }
     lastPriceNowOpen = !!(sawLabel || preferred);
     return preferred;
   }
@@ -1956,12 +2086,22 @@
     const range = priceRange(pairLabel);
     function quoteDecimals(v, text) {
       if (text) {
-        const m = String(text).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
-        if (m) return m[1].length;
+        const re = /\d{1,6}\.(\d{1,6})/g;
+        const s = String(text).replace(/,/g, ".");
+        let m, best = null;
+        while ((m = re.exec(s))) {
+          const n = parseFloat(m[0]);
+          if (!isFinite(n)) continue;
+          if (v != null && isFinite(v) && Math.abs(n - v) > 1e-6) continue;
+          const d = m[1].length;
+          if (best == null || d > best) best = d;
+        }
+        if (best != null) return best;
       }
       const t = String(v);
       const i = t.indexOf(".");
-      return i < 0 ? 0 : t.length - i - 1;
+      if (i < 0) return 0;
+      return Math.min(6, t.length - i - 1);
     }
     /* OCR often reads tenths 0↔1 / 5↔6 (1.032 ↔ 1.132). If both in range, prefer lastGoodPx else mid of range. */
     function correctOcr(v, range, lastGood) {
@@ -2001,8 +2141,11 @@
         if (info.decimals != null) dec = info.decimals;
       }
       if (dec == null) dec = quoteDecimals(v, text);
-      /* FX like NZD/USD is 5 dp (0.58105). 0.609 is 3 dp OCR garbage. */
-      if (v < 2 && dec < 4) return false;
+      /* FX like NZD/USD is 5 dp (0.58105). 1.13515 (5 dp) must pass. 0.609 is 3 dp OCR garbage. */
+      if (v < 2 && dec < 4) {
+        if (state.lastGoodPx != null) return false;
+        /* first tick already in CONFIG.ranges (lo/hi checked) — do not reject */
+      }
       /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
       if (state.lastGoodPx != null) {
         const abs = Math.abs(v - state.lastGoodPx);
@@ -2029,44 +2172,30 @@
       return null;
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
-    /* (a) Price Now only if the popup is already open. Never click (i)/pair list. */
-    let popupOpen = false;
-    try { popupOpen = !!pairInfoPopupOpen(); } catch (_ePo) { popupOpen = false; }
+    /* (a) Price Now first. Never click (i)/pair list / XfvzC heading. */
     const pn = readPriceNow();
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
       bindLivePriceObserver(pn.el);
     }
     if (pn && pn.v != null) {
-      if (lastCanvasOcr && lastCanvasOcr.v != null) {
-        const dv = Math.abs(pn.v - lastCanvasOcr.v);
-        if (dv > 0.08 && dv < 0.12 && pn.v >= range.lo && pn.v <= range.hi) {
-          /* tenths 0↔1: keep Price Now, ignore OCR */
-        } else {
-          pn.v = correctOcr(pn.v, range, state.lastGoodPx);
-        }
-      } else {
+      if (!(pn.v >= range.lo && pn.v <= range.hi)) {
         pn.v = correctOcr(pn.v, range, state.lastGoodPx);
+      } else if (lastCanvasOcr && lastCanvasOcr.v != null) {
+        const dv = Math.abs(pn.v - lastCanvasOcr.v);
+        if (dv > 0.08 && dv < 0.12) {
+          /* tenths 0↔1: keep Price Now, ignore OCR */
+        }
       }
     }
-    if (pn && ok(pn.v)) {
-      rememberQuotes([pn.v]);
-      lastPnAt = Date.now();
-      return acceptLivePx(pn.v);
-    }
-    if (popupOpen) {
-      if (pn && pn.v != null && pn.v >= range.lo && pn.v <= range.hi) {
+    if (pn && pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) {
+      if (ok(pn.v, pn) || state.lastGoodPx == null) {
         rememberQuotes([pn.v]);
         lastPnAt = Date.now();
         return acceptLivePx(pn.v);
       }
-      if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
-        return state.lastGoodPx;
-      }
-      const heldPn = holdLivePx();
-      if (heldPn != null) return heldPn;
-      return null;
     }
+    /* popupOpen with no Price Now number: fall through to canvas OCR / cyan tag. */
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       return state.lastGoodPx;
     }
@@ -3785,6 +3914,25 @@
   function timeIsClockMode() {
     try { return isClockExpiryValue(readTimeWidgetValue()); } catch (_e) { return false; }
   }
+  function timeLooksDuration(raw) {
+    const t = String(raw || "").replace(/\s+/g, "");
+    if (!t) return false;
+    if (TF_MS[t.toLowerCase()]) return true;
+    if (/^00:\d{2}(:\d{2})?$/.test(t)) return true;
+    return false;
+  }
+  function dismissTimeDropdown() {
+    try {
+      const opts = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true, view: window };
+      const t = document.activeElement || document.body || document.documentElement;
+      t.dispatchEvent(new KeyboardEvent("keydown", opts));
+      document.dispatchEvent(new KeyboardEvent("keydown", opts));
+      try { window.dispatchEvent(new KeyboardEvent("keydown", opts)); } catch (_eW) {}
+      t.dispatchEvent(new KeyboardEvent("keyup", opts));
+      document.dispatchEvent(new KeyboardEvent("keyup", opts));
+      try { window.dispatchEvent(new KeyboardEvent("keyup", opts)); } catch (_eW2) {}
+    } catch (_e0) {}
+  }
   function clickSwitchTime() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -3848,6 +3996,12 @@
     return true;
   }
   async function ensureDurationMode() {
+    let raw = "";
+    try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR) { raw = ""; }
+    if (timeLooksDuration(raw)) {
+      durationEnsuredOnce = true;
+      return;
+    }
     let clock = false;
     try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
     if (!clock) return;
@@ -3862,6 +4016,12 @@
       } catch (_e1) {}
     }
     if (switched) await sleep(150);
+    try { dismissTimeDropdown(); } catch (_eD) {}
+    if (switched) await sleep(80);
+    try {
+      const after = String(readTimeWidgetValue() || "").replace(/\s+/g, "");
+      if (timeLooksDuration(after)) durationEnsuredOnce = true;
+    } catch (_eA) {}
   }
   function platformHasOpenTrade() {
     const hud = document.getElementById("quotexbot-hud");
@@ -4056,16 +4216,15 @@
   async function maybeEnsureDurationIdle() {
     if (durationEnsuredOnce) return;
     if (realTradeOpenNow()) return;
-    let clock = false;
-    try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
-    if (!clock) {
-      try {
-        const v = readTimeWidgetValue();
-        const lab = String(v || "").toLowerCase().replace(/\s+/g, "");
-        if (v && TF_MS[lab]) durationEnsuredOnce = true;
-      } catch (_e1) {}
+    let raw = "";
+    try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR) { raw = ""; }
+    if (timeLooksDuration(raw)) {
+      durationEnsuredOnce = true;
       return;
     }
+    let clock = false;
+    try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
+    if (!clock) return;
     try { await ensureDurationMode(); } catch (_e2) {}
     durationEnsuredOnce = true;
   }
@@ -4920,7 +5079,7 @@
   function priceNowAlreadyOpen() {
     try {
       const pn = readPriceNow();
-      if (pn && pn.v != null) {
+      if (pn && pn.v != null && isFinite(Number(pn.v))) {
         lastPriceNowEl = pn.el || lastPriceNowEl;
         lastPriceNowOpen = true;
         lastPnAt = Date.now();
@@ -4940,23 +5099,22 @@
       flushCaptureWaiters();
       return;
     }
-    /* Popup already open (div.XfvzC Pair Information): use Price Now, skip screenshot OCR, never click heading. */
-    if (pairInfoPopupOpen()) {
-      try { onQuoteTick(); } catch (_ePn) {}
-      flushCaptureWaiters();
-      return;
+    /* Skip screenshot OCR only when Price Now already has a finite v.
+     * A visible XfvzC heading without a quote must still capture the cyan tag. */
+    function skipIfPriceNowFinite() {
+      try {
+        const pn = priceNowAlreadyOpen();
+        if (pn && pn.v != null && isFinite(Number(pn.v))) {
+          try { onQuoteTick(); } catch (_ePn) {}
+          flushCaptureWaiters();
+          return true;
+        }
+      } catch (_e) {}
+      return false;
     }
-    if (priceNowAlreadyOpen()) {
-      try { onQuoteTick(); } catch (_ePn2) {}
-      flushCaptureWaiters();
-      return;
-    }
+    if (skipIfPriceNowFinite()) return;
     try { ensurePairInfoOpen(); } catch (_eI) {}
-    if (pairInfoPopupOpen()) {
-      try { onQuoteTick(); } catch (_ePn3) {}
-      flushCaptureWaiters();
-      return;
-    }
+    if (skipIfPriceNowFinite()) return;
     const now = Date.now();
     /* Tesseract can take several seconds; if sendMessage never callbacks, unstick the eye. */
     if (captureBusy && now - lastCaptureAt >= 8000) captureBusy = false;
