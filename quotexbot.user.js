@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.32
+// @version      0.9.33
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.32",
+    version: "0.9.33",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -614,8 +614,10 @@ if (window.__quotexbotAbortInstalled) {
       "USD/BRL": [3, 9],
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
+      "NZD/USD": [0.50, 0.62],
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
+      "CAD/CHF": [0.40, 0.90],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -1195,6 +1197,25 @@ if (window.__quotexbotAbortInstalled) {
       const i = t.indexOf(".");
       return i < 0 ? 0 : t.length - i - 1;
     }
+    function correctOcr(v, range, lastGood) {
+      if (v == null || !isFinite(v)) return v;
+      function inRange(x) { return x >= range.lo && x <= range.hi; }
+      const tries = [v, v - 0.1, v + 0.1];
+      if (lastGood != null) {
+        let best = v, bestD = 1e9;
+        for (let i = 0; i < tries.length; i++) {
+          const t = tries[i];
+          if (!inRange(t)) continue;
+          const d = Math.abs(t - lastGood);
+          if (d < bestD) { bestD = d; best = t; }
+        }
+        return best;
+      }
+      if (inRange(v)) return v;
+      for (let i = 1; i < tries.length; i++) if (inRange(tries[i])) return tries[i];
+      return v;
+    }
+    if (axis && axis.v != null) axis.v = correctOcr(axis.v, range, state.lastGoodPx);
     function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
@@ -1216,6 +1237,7 @@ if (window.__quotexbotAbortInstalled) {
     }
     const axisOk = !!(axis && ok(axis.v, axis));
     const pn = axisOk ? null : readPriceNow();
+    if (pn && pn.v != null) pn.v = correctOcr(pn.v, range, state.lastGoodPx);
     rememberQuotes([axis && axis.v, pn && pn.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
     if (!axisOk && pn && ok(pn.v)) {
       state.lastGoodPx = pn.v;

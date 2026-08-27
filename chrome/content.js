@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.32-ext)
+ * quotexbot Chrome MV3 content script (v0.9.33-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -493,7 +493,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.32-ext",
+    version: "0.9.33-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -528,7 +528,7 @@
       "USD/BRL": [0.12, 9],
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
-      "NZD/USD": [0.40, 0.90],
+      "NZD/USD": [0.50, 0.62],
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
       "USD/ARS": [200, 5000],
@@ -1592,6 +1592,25 @@
       const i = t.indexOf(".");
       return i < 0 ? 0 : t.length - i - 1;
     }
+    /* OCR often reads leading 5 as 6 on the tenths place (0.58028 → 0.68026). */
+    function correctOcr(v, range, lastGood) {
+      if (v == null || !isFinite(v)) return v;
+      function inRange(x) { return x >= range.lo && x <= range.hi; }
+      const tries = [v, v - 0.1, v + 0.1]; // 5↔6 on the tenths place
+      if (lastGood != null) {
+        let best = v, bestD = 1e9;
+        for (let i = 0; i < tries.length; i++) {
+          const t = tries[i];
+          if (!inRange(t)) continue;
+          const d = Math.abs(t - lastGood);
+          if (d < bestD) { bestD = d; best = t; }
+        }
+        return best;
+      }
+      if (inRange(v)) return v;
+      for (let i = 1; i < tries.length; i++) if (inRange(tries[i])) return tries[i];
+      return v;
+    }
     function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
@@ -1627,13 +1646,17 @@
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
     /* (a) last canvas-OCR value if fresh (<15s, same as hold) and ok(range) */
-    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000 && ok(lastCanvasOcr.v, lastCanvasOcr)) {
-      rememberQuotes([lastCanvasOcr.v]);
-      return acceptLivePx(lastCanvasOcr.v);
+    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
+      lastCanvasOcr.v = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
+      if (ok(lastCanvasOcr.v, lastCanvasOcr)) {
+        rememberQuotes([lastCanvasOcr.v]);
+        return acceptLivePx(lastCanvasOcr.v);
+      }
     }
     /* (b) hit-test if it ever works (elementsFromPoint often sees only canvas) */
     const tag = readLiveTagByHit();
     if (tag && tag.el) bindLivePriceObserver(tag.el);
+    if (tag && tag.v != null) tag.v = correctOcr(tag.v, range, state.lastGoodPx);
     if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
       rememberQuotes([tag.v]);
       return acceptLivePx(tag.v);
@@ -1644,6 +1667,7 @@
       lastPriceNowEl = pn.el;
       if (!(tag && tag.el)) bindLivePriceObserver(pn.el);
     }
+    if (pn && pn.v != null) pn.v = correctOcr(pn.v, range, state.lastGoodPx);
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
       lastPnAt = Date.now();
