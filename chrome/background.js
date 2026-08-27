@@ -1,5 +1,5 @@
 /**
- * quotexbot MV3 service worker (v0.9.27-ext)
+ * quotexbot MV3 service worker (v0.9.28-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
  *   chrome.tabs.captureVisibleTab → crop a strip at the CHART canvas

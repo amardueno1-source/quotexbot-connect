@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "quotexbot",
-  "version": "0.9.27",
+  "version": "0.9.28",
   "description": "DEMO HUD on the open Quotex chart: visible chart-axis tag screenshot price, journal, auto Up/Down. No cookies/SSID.",
   "background": {
     "service_worker": "background.js"

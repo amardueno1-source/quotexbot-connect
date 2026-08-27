@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.27-ext)
+ * quotexbot Chrome MV3 content script (v0.9.28-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -492,7 +492,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.27-ext",
+    version: "0.9.28-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -564,6 +564,7 @@
   let lastMissLogAt = 0;
   let lastMissSig = "";
   let lastCanvasOcr = { v: null, at: 0 };
+  let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
 
@@ -594,6 +595,7 @@
     state.minimized = false;
     state.lastPx = "—";
     state.lastGoodPx = null;
+    lastGoodPxAt = 0;
     try { saveState(state); } catch (_e) {}
   }
   /* Saved HUD on the right axis covers the live price tag. Use bottom-left. */
@@ -602,6 +604,7 @@
   }
   state.lastPx = "—";
   state.lastGoodPx = null;
+  lastGoodPxAt = 0;
 
   function log(msg) {
     const now = new Date();
@@ -1500,7 +1503,7 @@
   }
 
   function ensurePairInfoOpen() {
-    /* v0.9.27-ext: still disabled. Never click (i) / pair / asset list.
+    /* v0.9.28-ext: still disabled. Never click (i) / pair / asset list.
        Price comes from a screenshot OCR of the chart-axis live tag. */
     return;
   }
@@ -1547,6 +1550,7 @@
 
   function resetLivePrice(reason) {
     state.lastGoodPx = null;
+    lastGoodPxAt = 0;
     state.lastPx = "—";
     lastObservedPx = null;
     lastAxisEl = null;
@@ -1598,24 +1602,34 @@
       /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
       if (state.lastGoodPx != null) {
         const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
-        if (rel > 0.04) return false;
+        /* 0.25%: 0.583 vs 0.581 is ~0.34% (neighboring axis tick). First reading still allowed. */
+        if (rel > 0.0025) return false;
       }
       return true;
+    }
+    function acceptLivePx(v) {
+      state.lastGoodPx = v;
+      lastGoodPxAt = Date.now();
+      return v;
+    }
+    function holdLivePx() {
+      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 2500) {
+        return state.lastGoodPx;
+      }
+      return null;
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
     /* (a) last canvas-OCR value if fresh (<1.5s) and ok(range) */
     if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 1500 && ok(lastCanvasOcr.v, lastCanvasOcr)) {
       rememberQuotes([lastCanvasOcr.v]);
-      state.lastGoodPx = lastCanvasOcr.v;
-      return lastCanvasOcr.v;
+      return acceptLivePx(lastCanvasOcr.v);
     }
     /* (b) hit-test if it ever works (elementsFromPoint often sees only canvas) */
     const tag = readLiveTagByHit();
     if (tag && tag.el) bindLivePriceObserver(tag.el);
     if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
       rememberQuotes([tag.v]);
-      state.lastGoodPx = tag.v;
-      return tag.v;
+      return acceptLivePx(tag.v);
     }
     /* (c) Price Now only if the popup happens to already be open. Never click (i). */
     const pn = readPriceNow();
@@ -1625,14 +1639,15 @@
     }
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
-      state.lastGoodPx = pn.v;
       lastPnAt = Date.now();
-      return pn.v;
+      return acceptLivePx(pn.v);
     }
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       return state.lastGoodPx;
     }
-    /* (d) else null (HUD —). Do not scrape market-list candidates. */
+    /* (d) OCR miss: keep lastGoodPx if < 2500ms old (do not flash HUD —). After 2.5s, —. */
+    const held = holdLivePx();
+    if (held != null) return held;
     return null;
   }
 
@@ -2840,12 +2855,12 @@
           let err = null;
           try { err = chrome.runtime.lastError; } catch (_e0) {}
           if (err || !resp || !resp.ok || resp.v == null) {
-            logCanvasMiss();
+            try { onQuoteTick(); } catch (_eM) {}
             return;
           }
           const v = Number(resp.v);
           if (!isFinite(v) || v < 0.05) {
-            logCanvasMiss();
+            try { onQuoteTick(); } catch (_eM2) {}
             return;
           }
           lastCanvasOcr = { v: v, at: Date.now(), text: resp.text ? String(resp.text) : "" };
@@ -2854,7 +2869,7 @@
       );
     } catch (_e) {
       captureBusy = false;
-      logCanvasMiss();
+      try { onQuoteTick(); } catch (_eM3) {}
     }
   }
 

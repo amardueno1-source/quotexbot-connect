@@ -158,8 +158,9 @@
     return blobs;
   }
 
-  function pickTagBlobs(blobs, dpr) {
+  function pickTagBlobs(blobs, dpr, cropH) {
     dpr = dpr > 0 ? dpr : 1;
+    cropH = cropH > 0 ? cropH : 0;
     var minW = 28 * dpr * 0.7;
     var maxW = 140 * dpr;
     var minH = 11 * dpr * 0.7;
@@ -174,11 +175,26 @@
       if (b.count < b.w * b.h * 0.18) continue;
       good.push(b);
     }
-    /* Highlighted live tag is a solid cyan fill; gray ticks score lower. */
+    /* Strongest blue/cyan fill (live tag). If two blobs, pick the one
+       closer to vertical center of the crop (last-candle dashed line),
+       not a higher/lower gray tick. */
+    var midY = cropH / 2;
     good.sort(function (a, c) {
+      var af = a.fill || 0, cf = c.fill || 0;
+      var ac = Math.max(0, a.chroma || 0), cc = Math.max(0, c.chroma || 0);
+      var aFill = af * (1 + ac);
+      var cFill = cf * (1 + cc);
+      if (Math.abs(cFill - aFill) > Math.max(aFill, cFill, 1e-6) * 0.10) {
+        return cFill - aFill;
+      }
+      if (cropH > 0) {
+        var ad = Math.abs(((a.minY + a.maxY) / 2) - midY);
+        var cd = Math.abs(((c.minY + c.maxY) / 2) - midY);
+        if (ad !== cd) return ad - cd;
+      }
       var as = a.score != null ? a.score : a.count;
       var cs = c.score != null ? c.score : c.count;
-      return (cs - as) || ((c.fill || 0) - (a.fill || 0)) || (c.count - a.count);
+      return (cs - as) || (cf - af) || (c.count - a.count);
     });
     return good;
   }
@@ -579,19 +595,16 @@
     var dpr = opts.dpr > 0 ? opts.dpr : 1;
     var strip = cropChartAxisStrip(img, opts.rect, dpr);
     if (!strip) return null;
-    var blobs = pickTagBlobs(findBlueBlobs(strip), dpr);
-    var best = null;
+    var blobs = pickTagBlobs(findBlueBlobs(strip), dpr, strip.height);
     var i;
     for (i = 0; i < Math.min(blobs.length, 4); i++) {
       var got = ocrBlob(strip, blobs[i]);
       if (!got || got.v == null) continue;
-      if (!best) { best = got; continue; }
-      var gd = got.dec != null ? got.dec : decimalPlacesOf(got.text);
-      var bd = best.dec != null ? best.dec : decimalPlacesOf(best.text);
-      /* Strongest-fill blob is first; only replace if another read is fuller. */
-      if (gd > bd) best = got;
+      /* Chosen blob is first (strongest fill / nearest center). Do not
+         replace with a neighboring gray tick that OCR'd more digits. */
+      return got;
     }
-    return best;
+    return null;
   }
 
   root.DigitOcr = {
