@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.9
+// @version      0.9.0
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.9";
+  const FILE_VER = "0.9.0";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.9",
+    version: "0.9.0",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -1322,18 +1322,18 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   const HUD_CSS = `
-    #quotexbot-hud{position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647 !important;width:380px;
+    #quotexbot-hud{position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647 !important;width:380px;height:480px;
       background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
-      user-select:none;display:block !important;visibility:visible !important;opacity:1 !important;
-      pointer-events:auto !important}
-    #quotexbot-hud.mini{width:auto;padding:6px 10px}
+      user-select:none;display:flex !important;flex-direction:column;visibility:visible !important;opacity:1 !important;
+      pointer-events:auto !important;overflow:hidden;min-width:240px;min-height:160px;max-width:96vw;max-height:96vh}
+    #quotexbot-hud.mini{width:auto;height:auto;min-height:0;padding:6px 10px}
     #quotexbot-hud .hd{display:flex;justify-content:space-between;align-items:center;
       padding:10px 12px;border-bottom:1px solid #2a3344;cursor:move}
     #quotexbot-hud h1{margin:0;font-size:13px}
     #quotexbot-hud .pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#2a3344}
     #quotexbot-hud .pill.ok{background:#14532d;color:#86efac}
-    #quotexbot-hud .body{padding:10px 12px}
+    #quotexbot-hud .body{padding:10px 12px;flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
     #quotexbot-hud .row{display:flex;justify-content:space-between;margin:4px 0;color:#9aa6b8;gap:8px}
     #quotexbot-hud .row b{color:#e8eef7;font-weight:600;text-align:right}
     #quotexbot-hud .btns{display:flex;gap:8px;margin-top:8px}
@@ -1345,20 +1345,24 @@ if (window.__quotexbotAbortInstalled) {
     #quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
     #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px}
     #quotexbot-hud .logh{margin:10px 0 4px;font-size:11px;color:#9aa6b8;display:flex;justify-content:space-between}
-    #quotexbot-hud .log{height:170px;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
+    #quotexbot-hud .log{flex:1;min-height:80px;height:auto;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
       border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
     #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
     #quotexbot-hud .log .empty{color:#6b7787}
     #quotexbot-hud .dashbtn{width:100%;margin-top:6px;background:#2a3344}
-    #quotexbot-dash{position:fixed;top:12px;left:12px;z-index:2147483646 !important;width:540px;
-      max-height:calc(100vh - 24px);overflow:auto;background:#0b0f16;color:#e8eef7;
+    #quotexbot-dash{position:fixed;top:12px;left:12px;z-index:2147483646 !important;width:540px;height:420px;
+      overflow:hidden;background:#0b0f16;color:#e8eef7;
       border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;
-      box-shadow:0 8px 28px rgba(0,0,0,.5);display:none !important;pointer-events:auto !important}
-    #quotexbot-dash.open{display:block !important}
+      box-shadow:0 8px 28px rgba(0,0,0,.5);display:none !important;pointer-events:auto !important;
+      min-width:260px;min-height:160px;max-width:96vw;max-height:96vh;flex-direction:column}
+    #quotexbot-dash.open{display:flex !important}
     #quotexbot-dash .hd{display:flex;justify-content:space-between;align-items:center;
-      padding:10px 12px;border-bottom:1px solid #2a3344}
+      padding:10px 12px;border-bottom:1px solid #2a3344;cursor:move;flex:0 0 auto}
+    #quotexbot-hud .qgrip,#quotexbot-dash .qgrip{position:absolute;right:1px;bottom:1px;width:18px;height:18px;
+      cursor:nwse-resize;z-index:5;background:linear-gradient(135deg,transparent 55%,#3d9cf0 55%);border-radius:0 0 10px 0}
+    #quotexbot-hud .body button,#quotexbot-dash .body{flex:1;min-height:0}
     #quotexbot-dash h1{margin:0;font-size:14px}
-    #quotexbot-dash .body{padding:10px 12px}
+    #quotexbot-dash .body{padding:10px 12px;flex:1;overflow:auto;min-height:0}
     #quotexbot-dash h2{margin:12px 0 6px;font-size:12px;color:#9aa6b8;font-weight:600}
     #quotexbot-dash table{width:100%;border-collapse:collapse;font-size:11px}
     #quotexbot-dash th,#quotexbot-dash td{padding:5px 6px;border-bottom:1px solid #1c2430;text-align:left}
@@ -1368,6 +1372,95 @@ if (window.__quotexbotAbortInstalled) {
     #quotexbot-dash .skip{color:#9aa6b8}
     #quotexbot-dash .m{background:transparent;color:#9aa6b8;border:0;cursor:pointer;font-size:16px}
   `;
+
+
+  function winBox(which) {
+    return which === "dash" ? state.dashWin : state.hudWin;
+  }
+  function applyWin(el, which) {
+    if (!el) return;
+    const w = winBox(which);
+    if (!w) return;
+    if (w.left != null) {
+      el.style.left = w.left + "px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+    }
+    if (w.top != null) el.style.top = w.top + "px";
+    if (w.w) el.style.width = w.w + "px";
+    if (w.h && !(which === "hud" && state.minimized)) el.style.height = w.h + "px";
+  }
+  function saveWin(el, which) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const box = {
+      left: Math.round(Math.max(0, r.left)),
+      top: Math.round(Math.max(0, r.top)),
+      w: Math.round(Math.max(220, r.width)),
+      h: Math.round(Math.max(140, r.height)),
+    };
+    if (which === "dash") state.dashWin = box;
+    else state.hudWin = box;
+    saveState(state);
+  }
+  function mountGrip(el, which) {
+    if (!el) return;
+    applyWin(el, which);
+    let g = el.querySelector(":scope > .qgrip");
+    if (!g) {
+      g = document.createElement("div");
+      g.className = "qgrip";
+      g.title = "সাইজ বদলাও";
+      el.appendChild(g);
+    }
+  }
+
+  let winDrag = null;
+  function onWinMove(ev) {
+    if (!winDrag) return;
+    const el = winDrag.el;
+    if (winDrag.mode === "move") {
+      let x = ev.clientX - winDrag.dx;
+      let y = ev.clientY - winDrag.dy;
+      x = Math.max(0, Math.min(x, window.innerWidth - 80));
+      y = Math.max(0, Math.min(y, window.innerHeight - 40));
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+    } else {
+      const w = Math.max(220, ev.clientX - winDrag.left);
+      const h = Math.max(140, ev.clientY - winDrag.top);
+      el.style.width = Math.min(w, window.innerWidth - winDrag.left) + "px";
+      el.style.height = Math.min(h, window.innerHeight - winDrag.top) + "px";
+    }
+  }
+  function onWinUp() {
+    if (!winDrag) return;
+    saveWin(winDrag.el, winDrag.which);
+    winDrag = null;
+  }
+  function startWin(el, which, ev) {
+    if (!el || !ev) return;
+    const t = ev.target;
+    if (t && t.closest && t.closest("button, a, input, .log, table")) return;
+    const grip = t && t.classList && t.classList.contains("qgrip");
+    const hd = t && t.closest && t.closest(".hd");
+    if (!grip && !hd) return;
+    ev.preventDefault();
+    const r = el.getBoundingClientRect();
+    winDrag = {
+      el: el,
+      which: which,
+      mode: grip ? "resize" : "move",
+      dx: ev.clientX - r.left,
+      dy: ev.clientY - r.top,
+      left: r.left,
+      top: r.top,
+    };
+  }
+  window.addEventListener("mousemove", onWinMove);
+  window.addEventListener("mouseup", onWinUp);
 
   function injectCss() {
     if (document.getElementById("quotexbot-hud-css")) return;
@@ -1385,8 +1478,9 @@ if (window.__quotexbotAbortInstalled) {
     if (old && old.parentNode) old.parentNode.removeChild(old);
     const el = document.createElement("div");
     el.id = "quotexbot-hud";
-    el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:block;visibility:visible;opacity:1;pointer-events:auto;");
+    el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
     (document.body || document.documentElement).appendChild(el);
+    applyWin(el, "hud");
     return el;
   }
 
@@ -1406,6 +1500,7 @@ if (window.__quotexbotAbortInstalled) {
         renderDash();
       }
     });
+    el.addEventListener("mousedown", function (ev) { startWin(el, "dash", ev); });
     return el;
   }
 
@@ -1436,6 +1531,7 @@ if (window.__quotexbotAbortInstalled) {
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
     }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
     dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    mountGrip(dash, "dash");
   }
 
   function render() {
@@ -1477,6 +1573,7 @@ if (window.__quotexbotAbortInstalled) {
       </div>`;
     const box = root.querySelector(".log");
     if (box) box.scrollTop = box.scrollHeight;
+    mountGrip(root, "hud");
     renderDash();
   }
 
@@ -1515,22 +1612,9 @@ if (window.__quotexbotAbortInstalled) {
     }
   }
 
-  let drag = null;
-  function onHudDown(ev) {
-    if (!ev.target.closest || !ev.target.closest(".hd")) return;
-    drag = { x: ev.clientX - root.offsetLeft, y: ev.clientY - root.offsetTop };
-  }
-  window.addEventListener("mouseup", () => { drag = null; });
-  window.addEventListener("mousemove", (ev) => {
-    if (!drag) return;
-    root.style.left = ev.clientX - drag.x + "px";
-    root.style.top = ev.clientY - drag.y + "px";
-    root.style.right = "auto";
-  });
-
   function bindHud(el) {
     el.addEventListener("click", onHudClick);
-    el.addEventListener("mousedown", onHudDown);
+    el.addEventListener("mousedown", function (ev) { startWin(el, "hud", ev); });
   }
   bindHud(root);
 
