@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.14
+// @version      0.9.15
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -70,7 +70,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.14";
+  const FILE_VER = "0.9.15";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.14",
+    version: "0.9.15",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -636,8 +636,11 @@ if (window.__quotexbotAbortInstalled) {
   const SCAN_MAX = 800;
   let axisObs = null;
   let lastAxisEl = null;
+  let lastAxisScanN = 0;
   let lastHudSig = "";
   let topHudYielded = false;
+  let lastMissLogAt = 0;
+  let lastMissSig = "";
 
   function loadState() {
     try {
@@ -729,10 +732,11 @@ if (window.__quotexbotAbortInstalled) {
     return { lo: 0.05, hi: 20 };
   }
 
-  function scrapeQuoteCandidates() {
+  function scrapeQuoteCandidates(pairLabel) {
     const hud = document.getElementById("quotexbot-hud");
     const found = [];
     const seen = {};
+    const range = pairLabel ? priceRange(pairLabel) : null;
     function add(v, el, decimals) {
       if (!isFinite(v) || v <= 0) return;
       const key = String(v);
@@ -743,15 +747,16 @@ if (window.__quotexbotAbortInstalled) {
       const wide = window.innerWidth || 1200;
       if (r.width < 4 || r.height < 4) return;
       if (r.top < 0 || r.left < 0) return;
-      if (r.left > wide * 0.62) return;
+      if (r.left > wide * 0.62 && !(range && v >= range.lo && v <= range.hi)) return;
       let font = 12;
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e2) {}
       found.push({ v: v, font: font, area: r.width * r.height, y: r.top, x: r.left, decimals: decimals });
     }
-    const re = /(\d{1,4}(?:\.\d{2,6}))/g;
+    const re = /(\d{1,6}(?:\.\d{2,6}))/g;
     const nodes = document.querySelectorAll("span, div, b, strong, p, label, em, h1, h2, h3, td, li");
-    const nMax = Math.min(nodes.length, SCAN_MAX);
-    for (let i = 0; i < nMax; i++) {
+    const nAll = nodes.length;
+    const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
+    for (let i = start; i < nAll; i++) {
       const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
       let raw = "";
@@ -779,7 +784,7 @@ if (window.__quotexbotAbortInstalled) {
         if (dashEl && dashEl.contains(node)) continue;
         if (/[+\u2212$]/.test(node.nodeValue || "")) continue;
         const t = (node.nodeValue || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
-        const mm = t.match(/\d{1,4}\.\d{2,6}/);
+        const mm = t.match(/\d{1,6}\.\d{2,6}/);
         if (!mm) continue;
         const el = node.parentElement || document.body;
         add(parseFloat(mm[0]), el, (mm[0].split(".")[1] || "").length);
@@ -801,9 +806,83 @@ if (window.__quotexbotAbortInstalled) {
 
   function collectAxisNodes(root, nodes) {
     try {
+      const view = (root && root.defaultView) || (root && root.ownerDocument && root.ownerDocument.defaultView) || window;
+      const wide = (view && view.innerWidth) || window.innerWidth || 1200;
+      const leftMin = wide * 0.45;
       const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
-      for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
+      const scored = [];
+      const pxRe = /^\d{1,6}\.\d{2,6}$/;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const el = list[i];
+        let raw = "";
+        try {
+          if (el.childElementCount > 2) continue;
+          raw = (el.textContent || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+        } catch (_eT) { continue; }
+        if (!raw || raw.length > 16 || !pxRe.test(raw)) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+        if (!r || r.width < 4 || r.height < 4) continue;
+        if (r.left < leftMin) continue;
+        scored.push({ el: el, x: r.left });
+        if (scored.length >= SCAN_MAX) break;
+      }
+      scored.sort(function (a, b) { return b.x - a.x; });
+      const room = SCAN_MAX - nodes.length;
+      const nKeep = Math.min(scored.length, room > 0 ? room : 0);
+      for (let j = 0; j < nKeep; j++) nodes.push(scored[j].el);
     } catch (_e0) {}
+  }
+
+  function collectRightShadowRoots(root) {
+    const out = [];
+    const seen = [];
+    function addShadow(el) {
+      if (!el || !el.shadowRoot) return;
+      if (out.length >= 15) return;
+      if (seen.indexOf(el.shadowRoot) >= 0) return;
+      seen.push(el.shadowRoot);
+      out.push(el.shadowRoot);
+    }
+    try {
+      const view = (root && root.defaultView) || (root && root.ownerDocument && root.ownerDocument.defaultView) || window;
+      const wide = (view && view.innerWidth) || window.innerWidth || 1200;
+      const high = (view && view.innerHeight) || window.innerHeight || 800;
+      const xMin = wide * 0.60;
+      const hud = document.getElementById("quotexbot-hud");
+      const dashEl = document.getElementById("quotexbot-dash");
+      const list = root.querySelectorAll("div, section, article, aside");
+      const large = [];
+      let rects = 0;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (large.length >= 40) break;
+        if (++rects > 400) break;
+        const el = list[i];
+        if (hud && (el === hud || hud.contains(el))) continue;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+        if (!r || r.width < 80 || r.height < 80) continue;
+        if (r.right < xMin) continue;
+        if (r.bottom < 0 || r.top > high || r.right < 0 || r.left > wide) continue;
+        large.push(el);
+      }
+      for (let j = 0; j < large.length && out.length < 15; j++) {
+        const el = large[j];
+        addShadow(el);
+        try {
+          const kids = el.children;
+          for (let k = 0; k < kids.length && out.length < 15; k++) {
+            addShadow(kids[k]);
+            try {
+              const gk = kids[k].children;
+              for (let g = 0; g < gk.length && out.length < 15; g++) addShadow(gk[g]);
+            } catch (_e3) {}
+          }
+        } catch (_e2) {}
+      }
+    } catch (_e) {}
+    return out;
   }
 
   function largeSameOriginChartDocs() {
@@ -854,6 +933,10 @@ if (window.__quotexbotAbortInstalled) {
       const leftMax = wide * 0.995;
       const nodes = [];
       collectAxisNodes(root, nodes);
+      try {
+        const shadows = collectRightShadowRoots(root);
+        for (let s = 0; s < shadows.length; s++) collectAxisNodes(shadows[s], nodes);
+      } catch (_eSh) {}
       const canvases = [];
       try {
         const cans = root.querySelectorAll("canvas");
@@ -916,6 +999,7 @@ if (window.__quotexbotAbortInstalled) {
       const extra = largeSameOriginChartDocs();
       for (let f = 0; f < extra.length; f++) scanDoc(extra[f]);
     }
+    lastAxisScanN = hits.length;
     if (!hits.length) return null;
     const midY = (window.innerHeight || 800) * 0.45;
     hits.sort(function (a, b) {
@@ -1085,11 +1169,15 @@ if (window.__quotexbotAbortInstalled) {
     resetLivePrice("পেয়ার বদল: " + old + " → " + newLabel + ", দাম রিসেট");
   }
 
-  function readLivePrice(pairLabel) {
+  function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
     const range = priceRange(pairLabel);
     const axis = readAxisLivePrice();
-    const all = scrapeQuoteCandidates();
+    const all = scrapeQuoteCandidates(pairLabel);
+    if (diag) {
+      diag.axis = lastAxisScanN;
+      diag.cand = all.length;
+    }
     function ok(v) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
@@ -1140,7 +1228,7 @@ if (window.__quotexbotAbortInstalled) {
 
   function peekQuotes(pairLabel) {
     const range = priceRange(pairLabel);
-    const all = scrapeQuoteCandidates();
+    const all = scrapeQuoteCandidates(pairLabel);
     const shown = all.slice(0, 6).map(function (c) { return String(c.v); }).join(", ");
     const nIn = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; }).length;
     return { n: all.length, nIn: nIn, shown: shown };
@@ -1817,7 +1905,7 @@ if (window.__quotexbotAbortInstalled) {
         log("OTC দাম " + p.label + " = " + lastPx + " · " + ticks.length + " tick");
       } else {
         const peek = peekQuotes(p.label);
-        log("OTC দাম পাইনি: " + p.label + " · পেজে " + peek.n + " নম্বর (" + (peek.shown || "খালি") + ")");
+        log("OTC miss · axis" + lastAxisScanN + " cand" + peek.n);
       }
 
       const hist = denseBars(p.label);
@@ -2287,12 +2375,20 @@ if (window.__quotexbotAbortInstalled) {
     const label = visiblePair();
     if (!label) return;
     onPairChange(label);
-    const px = readLivePrice(label);
+    const miss = { axis: 0, cand: 0 };
+    const px = readLivePrice(label, miss);
     if (px == null) {
       state.lastPx = "—";
       if (root && root.isConnected) {
         const row = root.querySelectorAll(".row b")[3];
         if (row) row.textContent = "—";
+      }
+      const sig = "OTC miss · axis" + miss.axis + " cand" + miss.cand;
+      const now = Date.now();
+      if (sig !== lastMissSig || now - lastMissLogAt > 4000) {
+        lastMissSig = sig;
+        lastMissLogAt = now;
+        log(sig);
       }
       return;
     }
