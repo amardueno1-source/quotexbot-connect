@@ -1,12 +1,8 @@
 /**
- * Minimal digit OCR for the Quotex chart-axis live price tag.
- * Tesseract.js wasm/core is several MB per file — too large to vendor.
- * Crops a strip at the largest chart canvas right edge (not the window
- * right / trade sidebar). Picks the blob with the strongest blue/cyan fill
- * (highlighted live tag, not gray axis ticks). Upscales that crop ~3×,
- * then reads the FULL digit string — do not stop at 3 decimals.
- * Typical quotes: 0.58136 (5 dp), 129.744 (3 dp), 289.76 (2 dp).
- * Whitelist 0123456789. PSM-style single line.
+ * Chart-axis live-tag crop helper (v0.9.29-ext).
+ * Crops the canvas-right blue/cyan live-price blob and upscales 3x.
+ * Primary OCR is Tesseract.js in the offscreen document — this file is
+ * NOT the recognizer. Homemade glyph matching is kept but unused.
  */
 (function (root) {
   "use strict";
@@ -607,9 +603,94 @@
     return null;
   }
 
+
+  function invertTagToBw(img) {
+    var w = img.width, h = img.height, data = img.data;
+    var i, o, L;
+    for (i = 0; i < w * h; i++) {
+      o = i * 4;
+      L = (0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2] + 0.5) | 0;
+      var v = L >= 150 ? 0 : 255;
+      data[o] = v; data[o + 1] = v; data[o + 2] = v; data[o + 3] = 255;
+    }
+    return img;
+  }
+
+  function padWhite(src, pad) {
+    pad = pad == null ? 10 : pad;
+    var nw = src.width + pad * 2, nh = src.height + pad * 2;
+    var out = makeImageData(nw, nh);
+    var d = out.data, s = src.data;
+    var i;
+    for (i = 0; i < d.length; i += 4) {
+      d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; d[i + 3] = 255;
+    }
+    for (var y = 0; y < src.height; y++) {
+      var si = y * src.width * 4;
+      var di = ((y + pad) * nw + pad) * 4;
+      d.set(s.subarray(si, si + src.width * 4), di);
+    }
+    return out;
+  }
+
+  function cropLiveTagImageData(img, opts) {
+    opts = opts || {};
+    var dpr = opts.dpr > 0 ? opts.dpr : 1;
+    var strip = cropChartAxisStrip(img, opts.rect, dpr);
+    if (!strip) return null;
+    var blobs = pickTagBlobs(findBlueBlobs(strip), dpr, strip.height);
+    if (!blobs.length) return null;
+    var blob = blobs[0];
+    var padX = Math.max(2, (blob.w * 0.04) | 0);
+    var padY = Math.max(2, (blob.h * 0.12) | 0);
+    var crop = cropImageData(
+      strip,
+      blob.minX - padX,
+      blob.minY - padY,
+      blob.w + padX * 2,
+      blob.h + padY * 2
+    );
+    if (!crop) return null;
+    var up = scaleNearest(crop, 3);
+    invertTagToBw(up);
+    return padWhite(up, 10);
+  }
+
+  async function cropLiveTagFromPngDataUrl(dataUrl, opts) {
+    var img = await pngToImageData(dataUrl);
+    return cropLiveTagImageData(img, opts);
+  }
+
+  function imageDataToPngDataUrl(img) {
+    if (!img) return null;
+    var c;
+    if (typeof document !== "undefined") {
+      c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+    } else if (typeof OffscreenCanvas === "function") {
+      c = new OffscreenCanvas(img.width, img.height);
+    } else {
+      return null;
+    }
+    var ctx = c.getContext("2d");
+    ctx.putImageData(img, 0, 0);
+    if (typeof c.toDataURL === "function") return c.toDataURL("image/png");
+    return c.convertToBlob({ type: "image/png" }).then(function (blob) {
+      return new Promise(function (resolve) {
+        var r = new FileReader();
+        r.onload = function () { resolve(r.result); };
+        r.readAsDataURL(blob);
+      });
+    });
+  }
+
   root.DigitOcr = {
     readPriceFromPngDataUrl: readPriceFromPngDataUrl,
     readPriceFromImageData: readPriceFromImageData,
+    cropLiveTagImageData: cropLiveTagImageData,
+    cropLiveTagFromPngDataUrl: cropLiveTagFromPngDataUrl,
+    imageDataToPngDataUrl: imageDataToPngDataUrl,
     parsePrice: parsePrice,
     findBlueBlobs: findBlueBlobs,
     pickTagBlobs: pickTagBlobs

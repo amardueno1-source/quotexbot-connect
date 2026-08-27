@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "quotexbot",
-  "version": "0.9.28",
-  "description": "DEMO HUD on the open Quotex chart: visible chart-axis tag screenshot price, journal, auto Up/Down. No cookies/SSID.",
+  "version": "0.9.29",
+  "description": "DEMO HUD on the open Quotex chart: Tesseract OCR of the visible chart-axis live tag. No cookies/SSID.",
   "background": {
     "service_worker": "background.js"
   },
   "permissions": [
-    "tabs"
+    "tabs",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>",
@@ -29,6 +30,21 @@
     "https://*.quotex.app/*",
     "https://market-qx.io/*",
     "https://*.market-qx.io/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/*",
+        "offscreen.html",
+        "offscreen.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
   ],
   "content_scripts": [
     {

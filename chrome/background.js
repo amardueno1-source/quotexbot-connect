@@ -1,20 +1,19 @@
 /**
- * quotexbot MV3 service worker (v0.9.28-ext)
+ * quotexbot MV3 service worker (v0.9.29-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
- *   chrome.tabs.captureVisibleTab → crop a strip at the CHART canvas
- *   right edge (blue/cyan live-price tag, left of the trade sidebar)
- *   → digit OCR → number.
+ *   chrome.tabs.captureVisibleTab → send PNG + chart-canvas rect to the
+ *   offscreen document, which crops the SMALL blue/cyan live-price tag
+ *   (canvas right −90/+24) and runs Tesseract.js (whitelist 0123456789.,
+ *   PSM 7). Wasm cannot run here; OCR is never injected into Quotex.
  *
  * Visible pixels only. No websocket/HTTP reverse-engineering.
- * Do not crop the window-right 110px (that is the $2 / Up / Down sidebar).
  */
 "use strict";
 
-importScripts("vendor/digit-ocr.js");
-
 var lastPack = { at: 0, resp: null };
 var inflight = null;
+var offscreenReady = null;
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== "capture") return;
@@ -70,22 +69,70 @@ function captureVisible(windowId) {
   });
 }
 
+function ensureOffscreen() {
+  if (offscreenReady) return offscreenReady;
+  offscreenReady = (async function () {
+    var url = chrome.runtime.getURL("offscreen.html");
+    if (chrome.runtime.getContexts) {
+      var ctxs = await chrome.runtime.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [url]
+      });
+      if (ctxs && ctxs.length) return;
+    }
+    try {
+      await chrome.offscreen.createDocument({
+        url: "offscreen.html",
+        reasons: ["WORKERS"],
+        justification: "Run Tesseract.js OCR on the chart live-price tag crop"
+      });
+    } catch (err) {
+      var msg = String(err && err.message ? err.message : err);
+      if (msg.indexOf("Only a single offscreen") < 0 && msg.indexOf("already exists") < 0) {
+        throw err;
+      }
+    }
+  })().catch(function (err) {
+    offscreenReady = null;
+    throw err;
+  });
+  return offscreenReady;
+}
+
+function sendOcr(payload) {
+  return new Promise(function (resolve, reject) {
+    chrome.runtime.sendMessage(payload, function (resp) {
+      var err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || String(err)));
+        return;
+      }
+      resolve(resp || { ok: false, error: "no ocr resp" });
+    });
+  });
+}
+
 function captureOcr(windowId, dpr, rect) {
   return captureVisible(windowId).then(function (dataUrl) {
     if (!dataUrl) return { ok: false, error: "empty capture" };
-    return self.DigitOcr.readPriceFromPngDataUrl(dataUrl, {
-      rect: rect,
-      dpr: dpr
+    return ensureOffscreen().then(function () {
+      var payload = {
+        type: "quotexbot-ocr",
+        dataUrl: dataUrl,
+        dpr: dpr,
+        rect: rect
+      };
+      return sendOcr(payload).catch(function () {
+        return new Promise(function (r) { setTimeout(r, 200); }).then(function () {
+          return sendOcr(payload);
+        });
+      });
     }).then(function (got) {
-      var v = null, text = "";
-      if (got != null && typeof got === "object") {
-        v = got.v;
-        text = got.text ? String(got.text) : "";
-      } else {
-        v = got;
-      }
+      if (!got || !got.ok) return got || { ok: false, error: "no tag" };
+      var v = got.v;
+      var text = got.text ? String(got.text) : "";
       if (v == null || !isFinite(v) || v < 0.05) {
-        return { ok: false, error: "no tag" };
+        return { ok: false, error: "no tag", text: text };
       }
       var resp = { ok: true, v: v };
       if (text) resp.text = text;

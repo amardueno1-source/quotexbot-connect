@@ -1,13 +1,14 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.28-ext)
+ * quotexbot Chrome MV3 content script (v0.9.29-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
  * Live price: screenshot the visible DEMO tab, crop the CHART-AXIS blue
  * last-price tag (right edge of the largest visible canvas, left of the
- * trade sidebar — not the window-right 110px). OCR digits. Hit-test is
- * fallback if it ever works. Never click (i), pair name, or PAIR INFORMATION.
+ * trade sidebar — not the window-right 110px). Tesseract.js OCRs that
+ * SMALL blob in an offscreen document. Hit-test is fallback if it ever
+ * works. Never click (i), pair name, or PAIR INFORMATION.
  * Price Now is used only if that popup is already open.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
@@ -492,7 +493,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.28-ext",
+    version: "0.9.29-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1503,8 +1504,8 @@
   }
 
   function ensurePairInfoOpen() {
-    /* v0.9.28-ext: still disabled. Never click (i) / pair / asset list.
-       Price comes from a screenshot OCR of the chart-axis live tag. */
+    /* v0.9.29-ext: still disabled. Never click (i) / pair / asset list.
+       Price comes from Tesseract OCR of the chart-axis live tag crop. */
     return;
   }
 
@@ -1576,35 +1577,11 @@
   function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
     const range = priceRange(pairLabel);
-    function quoteDecimals(v, text) {
-      if (text) {
-        const m = String(text).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
-        if (m) return m[1].length;
-      }
-      const s = String(v);
-      const i = s.indexOf(".");
-      return i < 0 ? 0 : s.length - i - 1;
-    }
-    function ok(v, info) {
+    function ok(v) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
       if (isPnlNumber(v)) return false;
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
-      let text = null, dec = null;
-      if (typeof info === "string") text = info;
-      else if (info && typeof info === "object") {
-        if (info.text) text = info.text;
-        if (info.decimals != null) dec = info.decimals;
-      }
-      if (dec == null) dec = quoteDecimals(v, text);
-      /* FX like NZD/USD is 5 dp (0.58136). 0.535 is a truncated misread. */
-      if (v < 2 && dec < 4) return false;
-      /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
-      if (state.lastGoodPx != null) {
-        const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
-        /* 0.25%: 0.583 vs 0.581 is ~0.34% (neighboring axis tick). First reading still allowed. */
-        if (rel > 0.0025) return false;
-      }
       return true;
     }
     function acceptLivePx(v) {
