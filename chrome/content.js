@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.15-ext)
+ * quotexbot Chrome MV3 content script (v0.9.16-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.15-ext",
+    version: "0.9.16-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -542,6 +542,8 @@
   const SCAN_MAX = 800;
   let axisObs = null;
   let lastAxisEl = null;
+  let lastPriceNowEl = null;
+  let lastPairInfoClickAt = 0;
   let lastAxisScanN = 0;
   let lastHudSig = "";
   let topHudYielded = false;
@@ -657,6 +659,7 @@
     for (let i = start; i < nAll; i++) {
       const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
+      if (inMarketList(el)) continue;
       let raw = "";
       try { raw = (el.innerText || el.textContent || ""); } catch (_e3) { continue; }
       if (/[+\u2212$]|\$/.test(raw)) continue;
@@ -680,6 +683,8 @@
         if (hud && hud.contains(node)) continue;
         const dashEl = document.getElementById("quotexbot-dash");
         if (dashEl && dashEl.contains(node)) continue;
+        const pel = node.parentElement;
+        if (pel && inMarketList(pel)) continue;
         if (/[+\u2212$]/.test(node.nodeValue || "")) continue;
         const t = (node.nodeValue || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
         const mm = t.match(/\d{1,6}\.\d{2,6}/);
@@ -964,29 +969,80 @@
     return false;
   }
 
-  /* PAIR INFORMATION modal: "Price Now" 129.744 sits in the center, not on the right axis. */
+  function inMarketList(el) {
+    if (!el) return false;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    if (hud && (el === hud || hud.contains(el))) return true;
+    if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
+    const listRe = /asset|currencies|most traded|search/i;
+    const wide = window.innerWidth || 1200;
+    const high = window.innerHeight || 800;
+    let cur = el;
+    for (let d = 0; d < 8 && cur && cur !== document.body && cur !== document.documentElement; d++) {
+      try {
+        const r = cur.getBoundingClientRect();
+        if (r && r.width >= 160 && r.height >= 160 && r.width <= wide * 0.58 && r.height <= high * 0.92) {
+          let t = "";
+          try { t = String(cur.innerText || "").slice(0, 1500); } catch (_eT) {}
+          if (t && listRe.test(t)) return true;
+          let inp = null;
+          try { inp = cur.querySelector && cur.querySelector("input"); } catch (_eI) {}
+          if (inp && isVisibleNode(inp)) {
+            const meta = String((inp.getAttribute("placeholder") || "") + " " + (inp.getAttribute("aria-label") || "") + " " + (inp.type || "") + " " + (inp.getAttribute("name") || ""));
+            if (/search|asset|currenc/i.test(meta) || String(inp.type || "").toLowerCase() === "search") return true;
+          }
+        }
+      } catch (_e0) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function resolvePriceNowEl(el, v) {
+    if (!el || v == null) return el;
+    function isNumNode(n) {
+      if (!n) return false;
+      let t = "";
+      try { t = String(n.innerText || n.textContent || "").replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, ""); } catch (_e) { return false; }
+      if (!t || t.length > 16) return false;
+      if (t === String(v)) return true;
+      const n2 = parseFloat(t);
+      return /^\d{1,6}\.\d{2,6}$/.test(t) && isFinite(n2) && Math.abs(n2 - v) < 1e-9;
+    }
+    if (isNumNode(el) && (!el.childElementCount || el.childElementCount <= 2)) return el;
+    try {
+      const kids = el.querySelectorAll("span, div, b, strong, em, label, p");
+      for (let i = 0; i < kids.length; i++) {
+        if (isNumNode(kids[i])) return kids[i];
+      }
+    } catch (_e1) {}
+    try {
+      if (isNumNode(el.nextElementSibling)) return el.nextElementSibling;
+      if (isNumNode(el.previousElementSibling)) return el.previousElementSibling;
+    } catch (_e2) {}
+    return el;
+  }
+
+  /* PAIR INFORMATION modal: "Price Now" ticks in the center, not on the right axis. */
   function readPriceNow() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
-    const strongRe = /price\s*now|current\s*price|цена/i;
+    const strongRe = /price\s*now/i;
+    const weakRe = /current\s*price|цена/i;
     const looseRe = /price/i;
     const exactRe = /^(\d{1,6}\.\d{2,6})$/;
-    const nodes = [];
-    forEachRoot(function (root) {
-      try {
-        const list = root.querySelectorAll("span, div, b, strong, label, em, p, td, li, h1, h2, h3, h4");
-        for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
-      } catch (_e0) {}
-    });
-    const nScan = Math.min(nodes.length, SCAN_MAX);
-    for (let i = 0; i < nScan; i++) {
-      const el = nodes[i];
-      if (hud && (el === hud || hud.contains(el))) continue;
-      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
-      if (!isVisibleNode(el)) continue;
+    let preferred = null;
+    let fallback = null;
+    function consider(el) {
+      if (preferred) return;
+      if (hud && (el === hud || hud.contains(el))) return;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) return;
+      if (inMarketList(el)) return;
+      if (!isVisibleNode(el)) return;
       const rawT = nodeText(el);
-      if (!rawT) continue;
-      if (/\b\d{1,2}\s*min\b/i.test(rawT) && !strongRe.test(rawT) && rawT.length < 24) continue;
+      if (!rawT) return;
+      if (/\b\d{1,2}\s*min\b/i.test(rawT) && !strongRe.test(rawT) && rawT.length < 24) return;
       const strongHere = strongRe.test(rawT);
       const strongNear = !strongHere && nearbyHas(el, strongRe, 1);
       if (strongHere || strongNear) {
@@ -998,16 +1054,138 @@
             if (v == null && el.parentElement) v = parsePriceNowNumber(nodeText(el.parentElement));
           } catch (_e1) {}
         }
-        if (v != null) return { v: v, el: el };
-        continue;
+        if (v != null) {
+          preferred = { v: v, el: resolvePriceNowEl(el, v) };
+          return;
+        }
       }
+      if (fallback) return;
+      const weakHere = weakRe.test(rawT) || nearbyHas(el, weakRe, 1);
       const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
-      if (stripped.length <= 16 && exactRe.test(stripped) && nearbyHas(el, looseRe, 2)) {
+      if (stripped.length <= 16 && exactRe.test(stripped) && (weakHere || nearbyHas(el, looseRe, 2))) {
         const v = parseFloat(stripped);
-        if (isFinite(v) && v >= 0.4 && v < 1000000) return { v: v, el: el };
+        if (isFinite(v) && v >= 0.4 && v < 1000000) fallback = { v: v, el: resolvePriceNowEl(el, v) };
       }
     }
-    return null;
+    forEachRoot(function (root) {
+      if (preferred) return;
+      try {
+        const list = root.querySelectorAll("span, div, b, strong, label, em, p, td, li, h1, h2, h3, h4");
+        const nAll = list.length;
+        const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
+        for (let i = nAll - 1; i >= start; i--) consider(list[i]);
+      } catch (_e0) {}
+    });
+    return preferred || fallback;
+  }
+
+  function findChartPairLabelEl() {
+    const want = lastSeenPair || visiblePair();
+    if (!want) return null;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const pairRe = new RegExp(want.replace("/", "\\s*/\\s*") + "(?:\\s*\\(?OTC\\)?)?", "i");
+    let best = null, bestScore = -1e9;
+    function consider(el) {
+      if (!el) return;
+      if (hud && (el === hud || hud.contains(el))) return;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) return;
+      if (inMarketList(el)) return;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { return; }
+      if (!t || t.length > 48) return;
+      if (!pairRe.test(t) && labelFromText(t) !== want) return;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { return; }
+      if (!r || r.width < 4 || r.height < 4) return;
+      if (!isVisibleNode(el)) return;
+      let font = 12;
+      try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
+      let extra = 0;
+      try {
+        const cls = String(el.className || "");
+        if (/active|selected|current|is-active|is-current/i.test(cls)) extra += 400;
+        if (r.top < 160 && r.left < (window.innerWidth || 1200) * 0.55) extra += 500;
+      } catch (_e4) {}
+      const score = font * 8 - r.top + (t.length < 22 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0) + extra;
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    forEachRoot(function (root) {
+      try {
+        const nodes = root.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p, label");
+        const nAll = nodes.length;
+        const start = nAll > SCAN_MAX ? nAll - SCAN_MAX : 0;
+        for (let n = start; n < nAll; n++) consider(nodes[n]);
+      } catch (_e0) {}
+    });
+    return best;
+  }
+
+  function ensurePairInfoOpen() {
+    if (readPriceNow()) return;
+    const now = Date.now();
+    if (now - lastPairInfoClickAt < 2500) return;
+    const pairEl = findChartPairLabelEl();
+    if (!pairEl) return;
+    lastPairInfoClickAt = now;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let pairRect;
+    try { pairRect = pairEl.getBoundingClientRect(); } catch (_eR) { return; }
+    const infoRe = /info/i;
+    const reloadRe = /pair information/i;
+    const found = [];
+    function consider(el) {
+      if (!el || el === pairEl) return;
+      if (hud && (el === hud || hud.contains(el))) return;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) return;
+      if (inMarketList(el)) return;
+      let inner = "";
+      try { inner = String(el.innerText || ""); } catch (_eT) {}
+      if (reloadRe.test(inner)) return;
+      const tag = String(el.tagName || "").toLowerCase();
+      if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a") return;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { return; }
+      if (!r || r.width < 4 || r.height < 4) return;
+      if (r.width > 36 || r.height > 36) return;
+      if (!isVisibleNode(el)) return;
+      const midPairY = pairRect.top + pairRect.height / 2;
+      const midElY = r.top + r.height / 2;
+      if (Math.abs(midElY - midPairY) > 44) return;
+      if (r.left > pairRect.right + 28) return;
+      if (r.right < pairRect.left - 90) return;
+      let title = "", cls = "", aria = "", role = "";
+      try {
+        title = String((el.getAttribute && el.getAttribute("title")) || "");
+        aria = String((el.getAttribute && el.getAttribute("aria-label")) || "");
+        role = String((el.getAttribute && el.getAttribute("role")) || "");
+        cls = String(el.className && el.className.baseVal != null ? el.className.baseVal : el.className || "");
+      } catch (_e2) {}
+      let score = 0;
+      if (infoRe.test(title) || infoRe.test(aria) || infoRe.test(cls) || infoRe.test(String(el.id || ""))) score += 60;
+      if (tag === "button" || role === "button" || tag === "a") score += 12;
+      if (tag === "svg" || tag === "i") score += 10;
+      if (Math.abs(r.width - r.height) < 8 && r.width <= 28) score += 16;
+      if (r.right <= pairRect.left + 6) score += 24;
+      if (score <= 0) return;
+      found.push({ el: el, score: score });
+    }
+    let scope = pairEl;
+    for (let d = 0; d < 5 && scope; d++) {
+      const p = scope.parentElement;
+      if (!p) break;
+      try {
+        const kids = p.querySelectorAll("button, svg, span, i, a");
+        const nAll = kids.length;
+        const nMax = Math.min(nAll, 80);
+        for (let i = 0; i < nMax; i++) consider(kids[i]);
+      } catch (_e3) {}
+      scope = p;
+    }
+    if (!found.length) return;
+    found.sort(function (a, b) { return b.score - a.score; });
+    try { found[0].el.click(); } catch (_eC) {}
   }
 
   const quoteSeen = {};
@@ -1055,6 +1233,8 @@
     state.lastPx = "—";
     lastObservedPx = null;
     lastAxisEl = null;
+    lastPriceNowEl = null;
+    lastPairInfoClickAt = 0;
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
     try { if (axisObs) axisObs.disconnect(); } catch (_e2) {}
     if (reason) log(reason);
@@ -1070,6 +1250,11 @@
   function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
     const range = priceRange(pairLabel);
+    let pn = readPriceNow();
+    if (!pn) {
+      ensurePairInfoOpen();
+      pn = readPriceNow();
+    }
     const axis = readAxisLivePrice();
     const all = scrapeQuoteCandidates(pairLabel);
     if (diag) {
@@ -1083,13 +1268,16 @@
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
       return true;
     }
-    const axisOk = !!(axis && ok(axis.v));
-    const pn = axisOk ? null : readPriceNow();
+    if (pn && pn.el) {
+      lastPriceNowEl = pn.el;
+      bindLivePriceObserver(pn.el);
+    }
     rememberQuotes([axis && axis.v, pn && pn.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
-    if (!axisOk && pn && ok(pn.v)) {
+    if (pn && ok(pn.v)) {
       state.lastGoodPx = pn.v;
       return pn.v;
     }
+    const axisOk = !!(axis && ok(axis.v));
     const cands = [];
     if (axisOk) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
     for (let i = 0; i < all.length; i++) {
@@ -2266,21 +2454,37 @@
     }
   }
 
-  function bindAxisObserver() {
-    const axis = readAxisLivePrice();
-    if (!axis || !axis.el) return;
+  function bindLivePriceObserver(el) {
+    if (!el) return;
     const missing = !!(lastAxisEl && lastAxisEl.isConnected === false);
-    if (!missing && axis.el === lastAxisEl) return;
-    lastAxisEl = axis.el;
+    if (!missing && el === lastAxisEl) return;
+    lastAxisEl = el;
     try { if (axisObs) axisObs.disconnect(); } catch (_e) {}
     try {
       axisObs = new MutationObserver(function () { onQuoteTick(); });
-      axisObs.observe(axis.el.parentElement || axis.el, {
+      axisObs.observe(el, {
         subtree: true,
         childList: true,
         characterData: true,
       });
     } catch (_e2) {}
+  }
+
+  function bindAxisObserver() {
+    if (lastPriceNowEl && lastPriceNowEl.isConnected === false) lastPriceNowEl = null;
+    if (lastPriceNowEl && lastPriceNowEl.isConnected) {
+      bindLivePriceObserver(lastPriceNowEl);
+      return;
+    }
+    const pn = readPriceNow();
+    if (pn && pn.el) {
+      lastPriceNowEl = pn.el;
+      bindLivePriceObserver(pn.el);
+      return;
+    }
+    const axis = readAxisLivePrice();
+    if (!axis || !axis.el) return;
+    bindLivePriceObserver(axis.el.parentElement || axis.el);
   }
 
   function startQuoteObserver() {
