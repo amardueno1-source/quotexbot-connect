@@ -1,12 +1,13 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.25-ext)
+ * quotexbot Chrome MV3 content script (v0.9.26-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
- * Live price: screenshot the visible DEMO tab, crop the RIGHT-EDGE blue
- * last-price tag (WebGL/canvas, not HTML), OCR digits. Hit-test is fallback
- * if it ever works. Never click (i), pair name, or PAIR INFORMATION.
+ * Live price: screenshot the visible DEMO tab, crop the CHART-AXIS blue
+ * last-price tag (right edge of the largest visible canvas, left of the
+ * trade sidebar — not the window-right 110px). OCR digits. Hit-test is
+ * fallback if it ever works. Never click (i), pair name, or PAIR INFORMATION.
  * Price Now is used only if that popup is already open.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
@@ -491,7 +492,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.25-ext",
+    version: "0.9.26-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -880,6 +881,29 @@
       } catch (_e2) {}
     }
     return best;
+  }
+
+  function chartCanvasRectCss() {
+    var found = null;
+    try { found = largestVisibleCanvas(document); } catch (_e0) { found = null; }
+    if (!found || !found.r) return null;
+    var r = found.r;
+    if (!(r.width > 80 && r.height > 80)) return null;
+    var left = r.left, top = r.top, width = r.width, height = r.height;
+    /* captureVisibleTab is the tab viewport. Map iframe canvas CSS → tab CSS. */
+    try {
+      var w = window;
+      while (w && w !== w.top) {
+        var fe = null;
+        try { fe = w.frameElement; } catch (_e1) { fe = null; }
+        if (!fe) break;
+        var fr = fe.getBoundingClientRect();
+        left += fr.left;
+        top += fr.top;
+        w = w.parent;
+      }
+    } catch (_e2) {}
+    return { left: left, top: top, width: width, height: height };
   }
 
   function nodeHasPaintedBg(el, view) {
@@ -1476,8 +1500,8 @@
   }
 
   function ensurePairInfoOpen() {
-    /* v0.9.25-ext: still disabled. Never click (i) / pair / asset list.
-       Price comes from a screenshot OCR of the right-edge canvas tag. */
+    /* v0.9.26-ext: still disabled. Never click (i) / pair / asset list.
+       Price comes from a screenshot OCR of the chart-axis live tag. */
     return;
   }
 
@@ -2780,9 +2804,14 @@
     lastCaptureAt = now;
     captureBusy = true;
     const dpr = window.devicePixelRatio || 1;
+    const msg = { type: "capture", dpr: dpr };
+    try {
+      const rect = chartCanvasRectCss();
+      if (rect) msg.rect = rect;
+    } catch (_eR) {}
     try {
       chrome.runtime.sendMessage(
-        { type: "capture", cropRight: 110, cropTop: 70, dpr: dpr },
+        msg,
         function (resp) {
           captureBusy = false;
           let err = null;

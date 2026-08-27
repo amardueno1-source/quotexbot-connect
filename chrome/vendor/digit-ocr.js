@@ -1,8 +1,9 @@
 /**
- * Minimal digit OCR for the Quotex right-axis live price tag.
+ * Minimal digit OCR for the Quotex chart-axis live price tag.
  * Tesseract.js wasm/core is several MB per file — too large to vendor.
- * Reads a tiny crop of white digits on a bright blue/cyan rounded rect
- * (e.g. 0.58264). Whitelist 0123456789. PSM-style single line.
+ * Crops a strip at the largest chart canvas right edge (not the window
+ * right / trade sidebar). Reads white digits on a bright blue/cyan
+ * rounded rect (e.g. 0.58264). Whitelist 0123456789. PSM-style single line.
  */
 (function (root) {
   "use strict";
@@ -524,17 +525,32 @@
     return readPriceFromImageData(img, opts);
   }
 
+  function cropChartAxisStrip(img, rect, dpr) {
+    if (!img || !rect) return null;
+    var left = Number(rect.left), top = Number(rect.top);
+    var width = Number(rect.width), height = Number(rect.height);
+    if (!isFinite(left) || !isFinite(top) || !isFinite(width) || !isFinite(height)) return null;
+    var right = left + width;
+    var bottom = top + height;
+    /* Chart live tag sits at canvas right edge, ~250–320px left of window right.
+       Strip: rect.right-90 .. rect.right+24, rect.top+20 .. rect.bottom-20.
+       Never crop the window-right 110px sidebar. */
+    var x0 = Math.round((right - 90) * dpr);
+    var x1 = Math.round((right + 24) * dpr);
+    var y0 = Math.round((top + 20) * dpr);
+    var y1 = Math.round((bottom - 20) * dpr);
+    x0 = clamp(x0, 0, img.width);
+    x1 = clamp(x1, 0, img.width);
+    y0 = clamp(y0, 0, img.height);
+    y1 = clamp(y1, 0, img.height);
+    if (x1 - x0 < 8 || y1 - y0 < 8) return null;
+    return cropImageData(img, x0, y0, x1 - x0, y1 - y0);
+  }
+
   function readPriceFromImageData(img, opts) {
     opts = opts || {};
     var dpr = opts.dpr > 0 ? opts.dpr : 1;
-    var cropRightCss = opts.cropRightCss > 0 ? opts.cropRightCss : 110;
-    var cropTopCss = opts.cropTopCss >= 0 ? opts.cropTopCss : 70;
-    var cropW = Math.max(40, Math.round(cropRightCss * dpr));
-    var cropTop = Math.max(0, Math.round(cropTopCss * dpr));
-    if (cropW > img.width) cropW = img.width;
-    if (cropTop >= img.height - 20) cropTop = Math.max(0, (img.height * 0.08) | 0);
-    var x0 = img.width - cropW;
-    var strip = cropImageData(img, x0, cropTop, cropW, img.height - cropTop);
+    var strip = cropChartAxisStrip(img, opts.rect, dpr);
     if (!strip) return null;
     var blobs = pickTagBlobs(findBlueBlobs(strip), dpr);
     var i;

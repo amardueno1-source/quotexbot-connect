@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "quotexbot",
-  "version": "0.9.25",
-  "description": "DEMO HUD on the open Quotex chart: visible right-axis tag screenshot price, journal, auto Up/Down. No cookies/SSID.",
+  "version": "0.9.26",
+  "description": "DEMO HUD on the open Quotex chart: visible chart-axis tag screenshot price, journal, auto Up/Down. No cookies/SSID.",
   "background": {
     "service_worker": "background.js"
   },
@@ -10,6 +10,7 @@
     "tabs"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://market-qx.info/*",
     "https://*.market-qx.info/*",
     "http://market-qx.info/*",

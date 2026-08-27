@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.25
+quotexbot Chrome MV3 extension  v0.9.26
 =======================================
 
 Load unpacked
@@ -14,4 +14,4 @@ The HUD is English. Pair names, CALL/PUT, and DEMO stay as-is.
 
 DEMO only. Visible DOM. No cookies / SSID / unofficial APIs.
 Stay on the open chart. Auto clicks Up/Down on DEMO only.
-Live price from visible right-axis tag screenshot.
+Live price from visible chart-axis tag screenshot (not the trade sidebar).
