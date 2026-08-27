@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.17-ext)
+ * quotexbot Chrome MV3 content script (v0.9.18-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.17-ext",
+    version: "0.9.18-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -517,7 +517,7 @@
       "USD/CAD": [1.2, 1.55],
       "USD/PHP": [40, 80],
       "USD/COP": [2000, 5000],
-      "USD/BRL": [3, 9],
+      "USD/BRL": [0.12, 9],
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
       "NZD/USD": [0.40, 0.90],
@@ -815,6 +815,7 @@
     return docs;
   }
 
+  /* Highlighted right-axis live tag is the last candle price (blue tag that tracks last close). Fallback when Price Now is missing. */
   function readAxisLivePrice() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -865,7 +866,7 @@
         const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
         if (!m) continue;
         const v = parseFloat(m[1]);
-        if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
+        if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
         let r;
         try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
         if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
@@ -932,7 +933,7 @@
       if (/^\.\d/.test(after)) continue;
       if (/^\s*min\b/i.test(after)) continue;
       const v = parseFloat(m[1]);
-      if (isFinite(v) && v >= 0.4 && v < 1000000) return v;
+      if (isFinite(v) && v >= 0.05 && v < 1000000) return v;
     }
     return null;
   }
