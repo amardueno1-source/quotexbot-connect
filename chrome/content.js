@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.34-ext)
+ * quotexbot Chrome MV3 content script (v0.9.35-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -157,10 +157,12 @@
     const po = t.match(/Payout[\s\S]{0,80}?(\d+(?:\.\d{1,2})?\s*\$|\$\s*\d+(?:\.\d{1,2})?)/i);
     if (po) payoutAmount = po[1].replace(/\s+/g, "");
 
-    const clock = t.match(/\b(\d{2}:\d{2}:\d{2})\b/);
-    const duration = clock ? clock[1] : "";
     const tf = t.match(/\b(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)\b/i);
     const timeframe = tf ? tf[1].toLowerCase() : "";
+    let duration = "";
+    const durHms = t.match(/\b(00:\d{2}:\d{2})\b/);
+    if (durHms) duration = durHms[1];
+    else if (timeframe) duration = timeframe;
 
     return {
       accountMode,
@@ -493,7 +495,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.34-ext",
+    version: "0.9.35-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -584,6 +586,18 @@
   if (!Array.isArray(state.logs)) state.logs = [];
   if (!state.pairStats || typeof state.pairStats !== "object") state.pairStats = {};
   if (!Array.isArray(state.journal)) state.journal = [];
+  if (Array.isArray(state.journal)) {
+    for (let ji = 0; ji < state.journal.length; ji++) {
+      const jr = state.journal[ji];
+      if (!jr) continue;
+      const lab = String(jr.dur || "").toLowerCase().replace(/\s+/g, "");
+      const ms = Number(jr.durMs) || 0;
+      if (!/^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/.test(lab) || ms > 900000 || ms < 5000 || /:/.test(lab) || /^\d{3,}s$/.test(lab)) {
+        jr.dur = "1m";
+        jr.durMs = 60000;
+      }
+    }
+  }
   if (state.ver !== VER) {
     state.ver = VER;
     state.logs = [];
@@ -598,10 +612,6 @@
     state.lastGoodPx = null;
     lastGoodPxAt = 0;
     try { saveState(state); } catch (_e) {}
-  }
-  /* Saved HUD on the right axis covers the live price tag. Use bottom-left. */
-  if (state.hudWin && state.hudWin.left != null && Number(state.hudWin.left) > 700) {
-    state.hudWin = null;
   }
   state.lastPx = "—";
   state.lastGoodPx = null;
@@ -638,6 +648,7 @@
   }
 
   let lastClickAt = 0;
+  let clickLock = false;
   if (Array.isArray(state.journal)) {
     for (let i = state.journal.length - 1; i >= 0; i--) {
       if (state.journal[i] && state.journal[i].ok && state.journal[i].t) {
@@ -1808,7 +1819,7 @@
     const titleRe = /^[A-Z]{3}\s*\/\s*[A-Z]{3}(?:\s*\(?\s*OTC\s*\)?)?$/i;
     const header = [];
     const right = [];
-    const locked = lastSeenPair || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "");
+    const locked = lastSeenPair;
     const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p, label");
     const nMax = Math.min(nodes.length, SCAN_MAX * 2);
     for (let n = 0; n < nMax; n++) {
@@ -1881,14 +1892,9 @@
     const titleRow = titleRowOf(header);
     const bestHeader = pick(titleRow) || pick(header);
     const bestRight = pick(right);
-    if (locked) {
-      if (hasLab(titleRow, locked) || hasLab(header, locked) || hasLab(right, locked)) return locked;
-      if (bestHeader && fxPairKey(bestHeader.lab) !== fxPairKey(locked)) return bestHeader.lab;
-      if (bestRight && fxPairKey(bestRight.lab) !== fxPairKey(locked)) return bestRight.lab;
-      return locked;
-    }
     if (bestHeader) return bestHeader.lab;
     if (bestRight) return bestRight.lab;
+    if (locked) return locked;
     if (isAssetListOpen()) return lastSeenPair || null;
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
@@ -2085,14 +2091,15 @@
   function parsePnlText(t) {
     const s = String(t || "").replace(/\s+/g, "");
     if (!s) return null;
-    if (/^0+(?:\.0+)?\$?$/.test(s) || s === "0.00$" || s === "$0.00") return { win: false, pnl: 0 };
+    if (/^0+(?:\.0+)?\$?$/.test(s) || s === "0.00$" || s === "$0.00" || s === "+0.00$" || s === "+0$") return { win: false, pnl: 0 };
     const m = s.match(/^([+\-\u2212])?\$?(\d+(?:\.\d+)?)\$?$/);
     if (!m) return null;
     const n = parseFloat(m[2]);
     if (!isFinite(n)) return null;
+    if (n < 0.001) return { win: false, pnl: 0 };
     if (m[1] === "-" || m[1] === "\u2212") return { win: false, pnl: -n };
-    if (m[1] === "+" || n > 0.001) return { win: true, pnl: n };
-    return { win: false, pnl: 0 };
+    if (m[1] === "+") return { win: true, pnl: n };
+    return null;
   }
   function listPnlSnippets() {
     const hud = document.getElementById("quotexbot-hud");
@@ -2150,33 +2157,68 @@
   function tfToMs(tf) {
     const t = String(tf || "").toLowerCase().replace(/\s+/g, "");
     if (TF_MS[t]) return TF_MS[t];
+    const mapped = clockToTf(t);
+    if (mapped && TF_MS[mapped]) return TF_MS[mapped];
     const m = t.match(/^(\d+)(s|m|h)$/);
     if (m) {
       const n = parseInt(m[1], 10);
-      if (m[2] === "s") return n * 1000;
-      if (m[2] === "m") return n * 60000;
-      if (m[2] === "h") return n * 3600000;
+      if (!isFinite(n) || n <= 0) return CONFIG.tradeMs || 60000;
+      if (m[2] === "s" && n >= 5 && n <= 60) return n * 1000;
+      if (m[2] === "m" && n >= 1 && n <= 30) return n * 60000;
+      if (m[2] === "h" && n === 1) return n * 3600000;
     }
     return CONFIG.tradeMs || 60000;
+  }
+  function isClockExpiryValue(v) {
+    const raw = String(v || "").replace(/\s+/g, "");
+    if (!raw) return false;
+    if (TF_MS[raw.toLowerCase()]) return false;
+    const hms = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+    if (hms) return (+hms[1]) >= 1;
+    const hm = raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (hm) {
+      const hh = +hm[1], mm = +hm[2];
+      return hh <= 23 && mm <= 59;
+    }
+    return false;
   }
   function clockToTf(v) {
     const raw = String(v || "").replace(/\s+/g, "");
     if (!raw) return null;
     const low = raw.toLowerCase();
     if (TF_MS[low]) return low;
-    let sec = null;
+    if (isClockExpiryValue(raw)) return null;
     const hms = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
-    if (hms) sec = (+hms[1]) * 3600 + (+hms[2]) * 60 + (+hms[3]);
-    const ms = !hms && raw.match(/^(\d{1,2}):(\d{2})$/);
-    if (ms) sec = (+ms[1]) * 60 + (+ms[2]);
-    if (sec == null || !isFinite(sec) || sec <= 0) return null;
+    if (!hms) return null;
+    const hh = +hms[1], mm = +hms[2], ss = +hms[3];
+    if (hh !== 0) return null;
+    const sec = mm * 60 + ss;
+    if (sec <= 0 || sec > 3600) return null;
     const keys = Object.keys(TF_MS);
     for (let i = 0; i < keys.length; i++) {
-      if (TF_MS[keys[i]] === sec * 1000) return keys[i];
+      if (Math.abs(TF_MS[keys[i]] - sec * 1000) <= 2000) return keys[i];
     }
-    if (sec % 3600 === 0) return (sec / 3600) + "h";
     if (sec % 60 === 0) return (sec / 60) + "m";
-    return sec + "s";
+    return null;
+  }
+  function saneDurMs(ms) {
+    const n = Number(ms) || 0;
+    const keys = Object.keys(TF_MS);
+    for (let i = 0; i < keys.length; i++) {
+      if (Math.abs(TF_MS[keys[i]] - n) <= 2000) return TF_MS[keys[i]];
+    }
+    if (n >= 5000 && n <= 900000) return n;
+    return CONFIG.tradeMs || 60000;
+  }
+  function fmtDur(row) {
+    const lab = String((row && row.dur) || "").toLowerCase().replace(/\s+/g, "");
+    if (TF_MS[lab]) return lab;
+    const ms = saneDurMs(row && row.durMs);
+    const keys = Object.keys(TF_MS);
+    for (let i = 0; i < keys.length; i++) {
+      if (TF_MS[keys[i]] === ms) return keys[i];
+    }
+    return "1m";
   }
   function readExpiryLabel() {
     const hud = document.getElementById("quotexbot-hud");
@@ -2214,8 +2256,11 @@
         const el = scrape.findLabeledInput(document, /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i);
         if (el) {
           const v = (el.value != null ? el.value : "") || (el.textContent || "");
-          const mapped = clockToTf(v);
-          if (mapped) return mapped;
+          if (isClockExpiryValue(v)) { /* wall-clock 22:05 / 00:01 — not duration */ }
+          else {
+            const mapped = clockToTf(v);
+            if (mapped) return mapped;
+          }
         }
       }
     } catch (_e4) {}
@@ -2307,21 +2352,24 @@
     for (let i = 0; i < state.journal.length; i++) {
       const row = state.journal[i];
       if (!(row && row.ok && !row.result)) continue;
-      const dur = row.durMs || CONFIG.tradeMs || 60000;
+      const dur = saneDurMs(row.durMs);
       const age = now - (row.t || 0);
-      if (age < dur) continue;
       if (countingDown) continue;
-      const samePanel = !!(row.fp && fpNow && fpNow === row.fp);
-      if (!samePanel) {
-        let got = null;
+      if (age < dur) continue;
+      {
+        let got = null, zero = null, loss = null;
         for (let k = 0; k < snips.length; k++) {
-          if (pnlAlreadyUsed(used, snips[k].pnl)) continue;
-          got = snips[k];
-          break;
+          if (pnlAlreadyUsed(used, snips[k].pnl) && Math.abs(snips[k].pnl) > 0.001) continue;
+          if (snips[k].win === false && Math.abs(snips[k].pnl) < 0.001) { if (!zero) zero = snips[k]; continue; }
+          if (snips[k].win) { if (!got) got = snips[k]; }
+          else if (!loss) loss = snips[k];
         }
+        if (zero) got = zero;
+        else if (!got) got = loss;
         if (got) {
           row.result = got.win ? "win" : "loss";
           row.pnl = got.pnl;
+          row.settledAt = now;
           used[String(got.pnl)] = 1;
           changed = true;
           try { notePair(row.pair, { lastResult: row.result, lastPnl: row.pnl }); } catch (_np) {}
@@ -2329,14 +2377,16 @@
           continue;
         }
       }
-      if (age >= dur + 45000) {
+      if (age >= dur + 12000) {
         row.result = "loss";
         row.pnl = 0;
+        row.settledAt = now;
         changed = true;
         try { notePair(row.pair, { lastResult: "loss", lastPnl: 0 }); } catch (_np2) {}
         log("Loss +0.00$ · " + (row.pair || ""));
       }
     }
+    if (!pendingJournal()) clickLock = false;
     if (changed) saveState(state);
   }
   function tradesFingerprint() {
@@ -2361,22 +2411,170 @@
     return bits.join("|");
   }
 
-  function tradeOpen() {
-    if (!lastClickAt) return false;
-    const now = Date.now();
-    const age = now - lastClickAt;
-    const last = lastOkJournal();
-    const dur = (last && last.durMs) || CONFIG.tradeMs || 60000;
-    if (last && !last.result) {
-      let cd = null;
-      try { cd = screenCountdownSec(); } catch (_e) {}
-      if (cd != null && cd > 1) return true;
-      if (age < dur) return true;
-      try { settlePendingJournal(); } catch (_e2) {}
-      if (!last.result && age < dur + 15000) return true;
+  function widgetText(el) {
+    try { return String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e) { return ""; }
+  }
+  function readTimeWidgetValue() {
+    try {
+      if (scrape && typeof scrape.findLabeledInput === "function") {
+        const el = scrape.findLabeledInput(document, /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i);
+        if (el) {
+          const v = (el.value != null && String(el.value).trim()) ? String(el.value) : widgetText(el);
+          if (v) return v.replace(/\s+/g, "");
+        }
+      }
+    } catch (_e0) {}
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, p, b, input");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e1) {}
+    let found = "";
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+      if (!r || r.left < wide * 0.45 || r.top < 80 || r.width < 4 || r.height < 4) continue;
+      const t = widgetText(el);
+      if (!t || t.length > 24) continue;
+      const raw = t.replace(/\s+/g, "");
+      if (isClockExpiryValue(raw)) return raw;
+      if (TF_MS[raw.toLowerCase()] && !found) found = raw;
+      if (/^00:\d{2}:\d{2}$/.test(raw) && !found) found = raw;
     }
-    if (age < (CONFIG.cooldownMs || 65000)) return true;
+    return found;
+  }
+  function timeIsClockMode() {
+    try { return isClockExpiryValue(readTimeWidgetValue()); } catch (_e) { return false; }
+  }
+  function clickSwitchTime() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, p");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e0) {}
+    let best = null, bestLen = 1e9;
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      const t = widgetText(el);
+      if (!t || t.length > 48) continue;
+      if (/\bpending\s*trade\b/i.test(t) || /\bpending\b/i.test(t)) continue;
+      if (!/switch\s*time/i.test(t)) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+      if (!r || r.width < 6 || r.height < 6) continue;
+      if (t.length < bestLen) { best = el; bestLen = t.length; }
+    }
+    if (!best) return false;
+    try {
+      if (typeof best.click === "function") best.click();
+      else if (typeof realishClick === "function") realishClick(best);
+    } catch (_e2) { return false; }
+    log("SWITCH TIME → duration");
+    return true;
+  }
+  function clickDurationChip(want) {
+    const need = String(want || "1m").toLowerCase();
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const re = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, b");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e0) {}
+    let best = null, bestScore = -1e9;
+    const wide = window.innerWidth || 1200;
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      const t = widgetText(el).replace(/\s+/g, "");
+      if (!re.test(t) || t.toLowerCase() !== need) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+      if (!r || r.width < 4 || r.height < 4) continue;
+      const score = (r.left > wide * 0.5 ? 80 : 0) - r.top;
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    if (!best) return false;
+    try {
+      if (typeof best.click === "function") best.click();
+      else if (typeof realishClick === "function") realishClick(best);
+    } catch (_e2) { return false; }
+    return true;
+  }
+  async function ensureDurationMode() {
+    let clock = false;
+    try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
+    if (!clock) return;
+    const switched = clickSwitchTime();
+    if (switched) await sleep(350);
+    if (!clickDurationChip("1m") && switched) {
+      try {
+        if (scrape && typeof scrape.findLabeledInput === "function" && typeof scrape.setControlValue === "function") {
+          const el = scrape.findLabeledInput(document, /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i);
+          if (el) scrape.setControlValue(el, "00:01:00");
+        }
+      } catch (_e1) {}
+    }
+    if (switched) await sleep(150);
+  }
+  function pendingJournal() {
+    const last = lastOkJournal();
+    return !!(last && !last.result);
+  }
+  function cooldownLeftMs() {
+    const last = lastOkJournal();
+    if (!last || !last.result) return 0;
+    const from = last.settledAt || ((last.t || 0) + saneDurMs(last.durMs));
+    const left = (CONFIG.cooldownMs || 65000) - (Date.now() - from);
+    return left > 0 ? left : 0;
+  }
+  function tradeBusy() {
+    if (clickLock) return true;
+    let cd = null;
+    try { cd = screenCountdownSec(); } catch (_e) {}
+    if (cd != null && cd > 0) return true;
+    if (pendingJournal()) return true;
     return false;
+  }
+  function tradeOpen() {
+    if (tradeBusy()) return true;
+    if (cooldownLeftMs() > 0) return true;
+    return false;
+  }
+  function tradeWaitSec() {
+    let cd = null;
+    try { cd = screenCountdownSec(); } catch (_e) {}
+    if (cd != null && cd > 0) return cd;
+    const last = lastOkJournal();
+    if (last && !last.result) {
+      const dur = saneDurMs(last.durMs);
+      return Math.max(1, Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000));
+    }
+    return Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
   }
 
   function snapDoc() {
@@ -2390,7 +2588,9 @@
     let durLabel = "1m";
     let durMsVal = CONFIG.tradeMs || 60000;
     try { durLabel = readExpiryLabel(); } catch (_d1) {}
-    try { durMsVal = readExpiryMs(); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+    try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+    durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
+    durMsVal = tfToMs(durLabel);
     let fpAtClick = "";
     try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
     const px = state.lastPx != null && state.lastPx !== "" ? String(state.lastPx) : "—";
@@ -2415,11 +2615,22 @@
       bars: barCount(pair),
     });
   }
-  function clickDir(dir) {
+  async function clickDir(dir) {
     if (!scrape) return { ok: false, error: "scrape missing" };
     const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
-    return dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
+    if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
+    try { await ensureDurationMode(); } catch (_eDur) {}
+    if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
+    clickLock = true;
+    try {
+      const r = dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
+      if (!r || !r.ok) clickLock = false;
+      return r;
+    } catch (err) {
+      clickLock = false;
+      return { ok: false, error: (err && err.message) || "fail" };
+    }
   }
 
   async function scanWatchlist() {
@@ -2440,9 +2651,9 @@
         return;
       }
       if (tradeOpen()) {
-        const left = Math.max(0, CONFIG.cooldownMs - (Date.now() - lastClickAt));
-        state.lastReason = "Trade open, wait " + Math.ceil(left / 1000) + "s";
-        log("Waiting on last trade/cooldown " + Math.ceil(left / 1000) + "s");
+        const left = tradeWaitSec();
+        state.lastReason = "Trade open, wait " + left + "s";
+        log("Waiting on last trade/cooldown " + left + "s");
         saveState(state); render();
         return;
       }
@@ -2505,14 +2716,18 @@
       saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
-      if (Date.now() - lastClickAt < CONFIG.cooldownMs) return;
+      if (tradeOpen()) { log("Trade open, skip"); return; }
 
       await sleep(400 + Math.floor(Math.random() * 600));
+      if (tradeOpen()) { log("Trade open, skip"); return; }
+      const r = await clickDir(d.signal === "PUT" ? "down" : "up");
+      if (r && r.error === "Trade open, skip") { log("Trade open, skip"); return; }
       let durLabel = "1m";
       let durMsVal = CONFIG.tradeMs || 60000;
       try { durLabel = readExpiryLabel(); } catch (_d1) {}
-      try { durMsVal = readExpiryMs(); } catch (_d2) { durMsVal = tfToMs(durLabel); }
-      const r = clickDir(d.signal === "PUT" ? "down" : "up");
+      try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+      durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
+      durMsVal = tfToMs(durLabel);
       let fpAtClick = "";
       try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
       addJournal({
@@ -2607,26 +2822,17 @@
     if (!el) return;
     const w = winBox(which);
     if (!w) return;
-    const left = w.left;
-    const top = w.top;
-    const off =
-      (left != null && (left < 0 || left > window.innerWidth - 60)) ||
-      (top != null && (top < 0 || top > window.innerHeight - 40));
-    if (off) {
-      if (which === "hud") {
-        el.style.left = "12px";
-        el.style.bottom = "12px";
-        el.style.top = "auto";
-        el.style.right = "auto";
-      }
-      return;
-    }
-    if (w.left != null) {
-      el.style.left = w.left + "px";
+    if (winDrag && winDrag.el === el) return;
+    let left = w.left;
+    let top = w.top;
+    if (left != null) left = Math.max(0, Math.min(Number(left) || 0, window.innerWidth - 80));
+    if (top != null) top = Math.max(0, Math.min(Number(top) || 0, window.innerHeight - 40));
+    if (left != null) {
+      el.style.left = left + "px";
       el.style.right = "auto";
       el.style.bottom = "auto";
     }
-    if (w.top != null) el.style.top = w.top + "px";
+    if (top != null) el.style.top = top + "px";
     if (w.w) el.style.width = w.w + "px";
     if (w.h && !(which === "hud" && state.minimized)) el.style.height = w.h + "px";
   }
@@ -2645,7 +2851,12 @@
   }
   function mountGrip(el, which) {
     if (!el) return;
-    applyWin(el, which);
+    if (which === "hud" && el.getAttribute("data-qpos") === "1") {
+      /* persist HUD left/top across renders */
+    } else {
+      applyWin(el, which);
+      if (which === "hud") el.setAttribute("data-qpos", "1");
+    }
     let g = el.querySelector(":scope > .qgrip");
     if (!g) {
       g = document.createElement("div");
@@ -2740,6 +2951,7 @@
       host.appendChild(el);
       applyWin(el, "hud");
       if (!state.hudWin) pinHud(el);
+      el.setAttribute("data-qpos", "1");
     }
     mount(0);
     return el;
@@ -2799,7 +3011,7 @@
       else if (j.ok) res = "open";
       else res = esc(j.err || "FAIL");
       const pos = j.pos || j.signal || "—";
-      const dur = j.dur || "—";
+      const dur = fmtDur(j);
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(pos) + "</td><td>" + esc(dur) + "</td><td>" + esc(j.px) + "</td><td class=\"" + rcls + "\">" + res + "</td></tr>";
     }).join("") || "<tr><td colspan=\"6\">No trades yet</td></tr>";
     dash.innerHTML = "<div class=\"hd\"><h1>quotexbot Dashboard v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>Total trades<b>" + ts.total + "</b></div><div class=\"win\">Profit<b>" + ts.wins + "</b></div><div class=\"lose\">Loss<b>" + ts.losses + "</b></div><div>Net<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">Waiting on result: " + ts.pending + "</p>" : "") + "<h2>Pairs · saved data</h2><table><thead><tr><th>Pair</th><th>OTC price</th><th>History</th><th>Signal</th><th>Reason</th></tr></thead><tbody>" + rows + "</tbody></table><h2>Trade journal</h2><table><thead><tr><th>Time</th><th>Pair</th><th>Position</th><th>Time</th><th>Price</th><th>Result</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
@@ -2808,6 +3020,7 @@
 
   function render() {
     if (topHudYielded) return;
+    try { settlePendingJournal(); } catch (_eS) {}
     const snap = snapDoc();
     const demo = snap.accountMode === "demo";
     if (state.minimized) {
@@ -2827,16 +3040,16 @@
       <div class="body">
         <div class="row"><span>Mode</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
-        <div class="row"><span>Pair</span><b>${state.lastPair || snap.asset || "—"}</b></div>
+        <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
         <div class="row"><span>History</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} bars · saved</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
-        <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + (j.dur ? " · " + j.dur : "") + (j.result ? "" : " · open"); })()}</b></div>
+        <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="row"><span>Account</span><b>${(function(){ const s = tradeStats(); return s.total + " trades · Profit " + s.wins + " · Loss " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="btns">
-          <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>Up</button>
-          <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>Down</button>
+          <button class="up" type="button" data-act="up" ${(demo || state.liveAck) && !tradeBusy() ? "" : "disabled"}>Up</button>
+          <button class="down" type="button" data-act="down" ${(demo || state.liveAck) && !tradeBusy() ? "" : "disabled"}>Down</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
         <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
@@ -2858,29 +3071,29 @@
     if (act === "mini") { state.minimized = true; saveState(state); render(); }
     if (act === "restore") { state.minimized = false; saveState(state); render(); }
     if (act === "dash") { state.dashOpen = !state.dashOpen; saveState(state); renderDash(); }
-    if (act === "up") {
-      const r = clickDir("up");
-      if (r.ok) {
-        journalManual("up", r);
-        state.lastReason = "Up clicked";
-        log("Manual Up OK");
-      } else {
-        state.lastReason = r.error || "fail";
-        log("Manual Up FAIL: " + (r.error || ""));
+    if (act === "up" || act === "down") {
+      if (tradeBusy()) {
+        log("Trade open, skip");
+        state.lastReason = "Trade open, skip";
+        saveState(state); render();
+        return;
       }
-      saveState(state); render();
-    }
-    if (act === "down") {
-      const r = clickDir("down");
-      if (r.ok) {
-        journalManual("down", r);
-        state.lastReason = "Down clicked";
-        log("Manual Down OK");
-      } else {
-        state.lastReason = r.error || "";
-        log("Manual Down FAIL: " + (r.error || ""));
-      }
-      saveState(state); render();
+      (async function () {
+        const r = await clickDir(act);
+        if (r && r.error === "Trade open, skip") {
+          log("Trade open, skip");
+          state.lastReason = "Trade open, skip";
+        } else if (r && r.ok) {
+          journalManual(act, r);
+          state.lastReason = act === "down" ? "Down clicked" : "Up clicked";
+          log(act === "down" ? "Manual Down OK" : "Manual Up OK");
+        } else {
+          state.lastReason = (r && r.error) || "fail";
+          log((act === "down" ? "Manual Down FAIL: " : "Manual Up FAIL: ") + ((r && r.error) || ""));
+        }
+        saveState(state); render();
+      })();
+      return;
     }
     if (act === "auto") {
       const snap = snapDoc();
@@ -3095,6 +3308,10 @@
 
   startQuoteObserver();
 
+  try {
+    const vis0 = visiblePair();
+    if (vis0) onPairChange(vis0);
+  } catch (_eVis) {}
 
   log(scrape ? ("HUD on v" + CONFIG.version + " · CONFIG") : "HUD on, no scrape");
   render();
