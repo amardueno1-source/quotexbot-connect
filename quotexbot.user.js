@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.31
+// @version      0.9.32
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.31",
+    version: "0.9.32",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1153,6 +1153,9 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   let lastGoodPxAt = 0;
+  function fxPairKey(label) {
+    return String(label || "").replace(/\(\s*OTC\s*\)/gi, "").replace(/\s+/g, "").toUpperCase();
+  }
   function resetLivePrice(reason) {
     state.lastGoodPx = null;
     lastGoodPxAt = 0;
@@ -1166,8 +1169,11 @@ if (window.__quotexbotAbortInstalled) {
   function onPairChange(newLabel) {
     if (!newLabel || newLabel === lastSeenPair) return;
     const old = lastSeenPair || state.lastPair || "—";
+    const sameFx = fxPairKey(old) === fxPairKey(newLabel) && fxPairKey(newLabel) !== "";
     lastSeenPair = newLabel;
     state.lastPair = newLabel;
+    /* Same FX pair with (OTC)/whitespace flicker — keep lastGoodPx. */
+    if (sameFx) return;
     resetLivePrice("পেয়ার বদল: " + old + " → " + newLabel + ", দাম রিসেট");
   }
 

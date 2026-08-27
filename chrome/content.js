@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.31-ext)
+ * quotexbot Chrome MV3 content script (v0.9.32-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -493,7 +493,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.31-ext",
+    version: "0.9.32-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1549,6 +1549,9 @@
     return false;
   }
 
+  function fxPairKey(label) {
+    return String(label || "").replace(/\(\s*OTC\s*\)/gi, "").replace(/\s+/g, "").toUpperCase();
+  }
   function resetLivePrice(reason) {
     state.lastGoodPx = null;
     lastGoodPxAt = 0;
@@ -1569,8 +1572,11 @@
   function onPairChange(newLabel) {
     if (!newLabel || newLabel === lastSeenPair) return;
     const old = lastSeenPair || state.lastPair || "—";
+    const sameFx = fxPairKey(old) === fxPairKey(newLabel) && fxPairKey(newLabel) !== "";
     lastSeenPair = newLabel;
     state.lastPair = newLabel;
+    /* Same FX pair with (OTC)/whitespace flicker — keep lastGoodPx. */
+    if (sameFx) return;
     resetLivePrice("Pair changed: " + old + " → " + newLabel + ", price reset");
   }
 
@@ -1620,8 +1626,8 @@
       return null;
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
-    /* (a) last canvas-OCR value if fresh (<1.5s) and ok(range) */
-    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 1500 && ok(lastCanvasOcr.v, lastCanvasOcr)) {
+    /* (a) last canvas-OCR value if fresh (<15s, same as hold) and ok(range) */
+    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000 && ok(lastCanvasOcr.v, lastCanvasOcr)) {
       rememberQuotes([lastCanvasOcr.v]);
       return acceptLivePx(lastCanvasOcr.v);
     }
@@ -2839,6 +2845,8 @@
     if (topHudYielded) return;
     if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
     const now = Date.now();
+    /* Tesseract can take several seconds; if sendMessage never callbacks, unstick the eye. */
+    if (captureBusy && now - lastCaptureAt >= 8000) captureBusy = false;
     if (captureBusy || now - lastCaptureAt < 800) return;
     lastCaptureAt = now;
     captureBusy = true;
@@ -2848,11 +2856,13 @@
       const rect = chartCanvasRectCss();
       if (rect) msg.rect = rect;
     } catch (_eR) {}
+    const failsafe = setTimeout(function () { captureBusy = false; }, 8000);
     try {
       chrome.runtime.sendMessage(
         msg,
         function (resp) {
           captureBusy = false;
+          try { clearTimeout(failsafe); } catch (_eC) {}
           let err = null;
           try { err = chrome.runtime.lastError; } catch (_e0) {}
           if (err || !resp || !resp.ok || resp.v == null) {
@@ -2870,6 +2880,7 @@
       );
     } catch (_e) {
       captureBusy = false;
+      try { clearTimeout(failsafe); } catch (_eC2) {}
       try { onQuoteTick(); } catch (_eM3) {}
     }
   }
