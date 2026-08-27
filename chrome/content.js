@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.23-ext)
+ * quotexbot Chrome MV3 content script (v0.9.24-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -490,7 +490,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.23-ext",
+    version: "0.9.24-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -591,8 +591,8 @@
     state.lastGoodPx = null;
     try { saveState(state); } catch (_e) {}
   }
-  /* Saved HUD over pair chip / asset list (left < 420) covers the chart (i). Use bottom-right. */
-  if (state.hudWin && state.hudWin.left != null && Number(state.hudWin.left) < 420) {
+  /* Saved HUD on the right axis covers the live price tag. Use bottom-left. */
+  if (state.hudWin && state.hudWin.left != null && Number(state.hudWin.left) > 700) {
     state.hudWin = null;
   }
   state.lastPx = "—";
@@ -891,89 +891,123 @@
   }
 
   function readLiveTagByHit() {
-    const docs = [document];
-    try {
-      const extra = largeSameOriginChartDocs();
-      for (let i = 0; i < extra.length; i++) {
-        if (extra[i] && extra[i] !== document) docs.push(extra[i]);
+    const peSaved = [];
+    function peNone(doc) {
+      if (!doc || !doc.getElementById) return;
+      const ids = ["quotexbot-hud", "quotexbot-dash"];
+      for (let i = 0; i < ids.length; i++) {
+        try {
+          const el = doc.getElementById(ids[i]);
+          if (!el || !el.style) continue;
+          peSaved.push({
+            el: el,
+            pe: el.style.getPropertyValue("pointer-events"),
+            pri: el.style.getPropertyPriority("pointer-events")
+          });
+          el.style.setProperty("pointer-events", "none", "important");
+        } catch (_ePe) {}
       }
-    } catch (_eD) {}
-    const hits = [];
-    const seen = [];
-    const pxRe = /\d{1,6}\.\d{1,6}/;
-    for (let d = 0; d < docs.length; d++) {
-      const root = docs[d];
-      const view = (root && root.defaultView) || window;
-      const canvas = largestVisibleCanvas(root);
-      if (!canvas || !canvas.r) continue;
-      const cr = canvas.r;
-      const midY = cr.top + cr.height / 2;
-      const y0 = cr.top + 40;
-      const y1 = cr.bottom - 40;
-      if (!(y1 > y0)) continue;
-      const x0 = cr.right - 12;
-      const x1 = cr.right + 48;
-      const nY = 25;
-      const nX = 4;
-      const vw = (view && view.innerWidth) || 1200;
-      const vh = (view && view.innerHeight) || 800;
-      const hitDoc = root;
-      for (let yi = 0; yi < nY; yi++) {
-        const y = y0 + (y1 - y0) * (yi / (nY - 1));
-        if (y < 0 || y > vh) continue;
-        for (let xi = 0; xi < nX; xi++) {
-          const x = x0 + (x1 - x0) * (xi / (nX - 1));
-          if (x < 0 || x > vw) continue;
-          let stack = [];
-          try {
-            if (typeof hitDoc.elementsFromPoint === "function") stack = hitDoc.elementsFromPoint(x, y) || [];
-            else if (view && view.document && typeof view.document.elementsFromPoint === "function") {
-              stack = view.document.elementsFromPoint(x, y) || [];
+    }
+    function peRestore() {
+      for (let i = 0; i < peSaved.length; i++) {
+        try {
+          const sv = peSaved[i];
+          if (sv.pe) sv.el.style.setProperty("pointer-events", sv.pe, sv.pri || "");
+          else sv.el.style.removeProperty("pointer-events");
+        } catch (_eR) {}
+      }
+    }
+    try {
+      const docs = [document];
+      try {
+        const extra = largeSameOriginChartDocs();
+        for (let i = 0; i < extra.length; i++) {
+          if (extra[i] && extra[i] !== document) docs.push(extra[i]);
+        }
+      } catch (_eD) {}
+      peNone(document);
+      for (let d0 = 0; d0 < docs.length; d0++) {
+        if (docs[d0] !== document) peNone(docs[d0]);
+      }
+      const hits = [];
+      const seen = [];
+      const pxRe = /\d{1,6}\.\d{1,6}/;
+      for (let d = 0; d < docs.length; d++) {
+        const root = docs[d];
+        const view = (root && root.defaultView) || window;
+        const canvas = largestVisibleCanvas(root);
+        if (!canvas || !canvas.r) continue;
+        const cr = canvas.r;
+        const midY = cr.top + cr.height / 2;
+        const y0 = cr.top + 40;
+        const y1 = cr.bottom - 40;
+        if (!(y1 > y0)) continue;
+        const x0 = cr.right - 12;
+        const x1 = cr.right + 48;
+        const nY = 25;
+        const nX = 4;
+        const vw = (view && view.innerWidth) || 1200;
+        const vh = (view && view.innerHeight) || 800;
+        const hitDoc = root;
+        for (let yi = 0; yi < nY; yi++) {
+          const y = y0 + (y1 - y0) * (yi / (nY - 1));
+          if (y < 0 || y > vh) continue;
+          for (let xi = 0; xi < nX; xi++) {
+            const x = x0 + (x1 - x0) * (xi / (nX - 1));
+            if (x < 0 || x > vw) continue;
+            let stack = [];
+            try {
+              if (typeof hitDoc.elementsFromPoint === "function") stack = hitDoc.elementsFromPoint(x, y) || [];
+              else if (view && view.document && typeof view.document.elementsFromPoint === "function") {
+                stack = view.document.elementsFromPoint(x, y) || [];
+              }
+            } catch (_eP) { stack = []; }
+            /* Walk the full stack: a canvas hit must not hide a short live-tag text node later in the same stack. */
+            for (let h = 0; h < stack.length; h++) {
+              const el = stack[h];
+              if (!el || skipHudDashEl(el)) continue;
+              const tag = String(el.tagName || "").toUpperCase();
+              if (tag === "CANVAS" || tag === "IFRAME" || tag === "HTML" || tag === "BODY") continue;
+              if (seen.indexOf(el) >= 0) continue;
+              seen.push(el);
+              let rawT = "";
+              try { rawT = String(el.innerText || el.textContent || ""); } catch (_eT) { continue; }
+              if (!rawT) continue;
+              if (/[+\u2212$€%]|\u0024/.test(rawT) && !pxRe.test(rawT.replace(/[\s\u00a0\u202f]/g, ""))) continue;
+              const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+              if (!stripped || stripped.length > 16) continue;
+              const m = stripped.match(pxRe);
+              if (!m) continue;
+              const v = parseFloat(m[0]);
+              if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
+              let r;
+              try { r = el.getBoundingClientRect(); } catch (_eR2) { continue; }
+              if (!r || r.width < 2 || r.height < 2) continue;
+              let hasBg = nodeHasPaintedBg(el, view);
+              if (!hasBg) {
+                try { hasBg = nodeHasPaintedBg(el.parentElement, view); } catch (_eB) {}
+              }
+              hits.push({
+                v: v,
+                el: el,
+                hasBg: hasBg,
+                short: stripped.length <= 16,
+                yDist: Math.abs((r.top + r.height / 2) - midY),
+                len: stripped.length
+              });
             }
-          } catch (_eP) { stack = []; }
-          const nHit = Math.min(stack.length, 8);
-          for (let h = 0; h < nHit; h++) {
-            const el = stack[h];
-            if (!el || skipHudDashEl(el)) continue;
-            const tag = String(el.tagName || "").toUpperCase();
-            if (tag === "CANVAS" || tag === "IFRAME" || tag === "HTML" || tag === "BODY") continue;
-            if (seen.indexOf(el) >= 0) continue;
-            seen.push(el);
-            let rawT = "";
-            try { rawT = String(el.innerText || el.textContent || ""); } catch (_eT) { continue; }
-            if (!rawT) continue;
-            if (/[+\u2212$€%]|\u0024/.test(rawT) && !pxRe.test(rawT.replace(/[\s\u00a0\u202f]/g, ""))) continue;
-            const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
-            if (!stripped || stripped.length > 16) continue;
-            const m = stripped.match(pxRe);
-            if (!m) continue;
-            const v = parseFloat(m[0]);
-            if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
-            let r;
-            try { r = el.getBoundingClientRect(); } catch (_eR) { continue; }
-            if (!r || r.width < 2 || r.height < 2) continue;
-            let hasBg = nodeHasPaintedBg(el, view);
-            if (!hasBg) {
-              try { hasBg = nodeHasPaintedBg(el.parentElement, view); } catch (_eB) {}
-            }
-            hits.push({
-              v: v,
-              el: el,
-              hasBg: hasBg,
-              short: stripped.length <= 16,
-              yDist: Math.abs((r.top + r.height / 2) - midY),
-              len: stripped.length
-            });
           }
         }
       }
+      lastAxisScanN = hits.length;
+      if (!hits.length) return null;
+      hits.sort(function (a, b) {
+        return (b.hasBg - a.hasBg) || (b.short - a.short) || (a.yDist - b.yDist) || (a.len - b.len);
+      });
+      return hits[0];
+    } finally {
+      peRestore();
     }
-    lastAxisScanN = hits.length;
-    if (!hits.length) return null;
-    hits.sort(function (a, b) {
-      return (b.hasBg - a.hasBg) || (b.short - a.short) || (a.yDist - b.yDist) || (a.len - b.len);
-    });
-    return hits[0];
   }
 
   /* Highlighted right-axis live tag is the last candle price (blue tag that tracks last close). Fallback when Price Now is missing. */
@@ -2263,7 +2297,7 @@
   }
 
   const HUD_CSS = `
-    #quotexbot-hud{position:fixed;bottom:12px;right:12px;top:auto;left:auto;z-index:2147483647 !important;width:380px;height:480px;
+    #quotexbot-hud{position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647 !important;width:380px;height:480px;
       background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
       user-select:none;display:flex !important;flex-direction:column;visibility:visible !important;opacity:1 !important;
@@ -2334,10 +2368,10 @@
       (top != null && (top < 0 || top > window.innerHeight - 40));
     if (off) {
       if (which === "hud") {
-        el.style.right = "12px";
+        el.style.left = "12px";
         el.style.bottom = "12px";
         el.style.top = "auto";
-        el.style.left = "auto";
+        el.style.right = "auto";
       }
       return;
     }
@@ -2434,10 +2468,10 @@
 
   function pinHud(el) {
     if (!el) return;
-    el.style.right = "12px";
+    el.style.left = "12px";
     el.style.bottom = "12px";
     el.style.top = "auto";
-    el.style.left = "auto";
+    el.style.right = "auto";
     el.style.zIndex = "2147483647";
   }
 
@@ -2447,7 +2481,7 @@
     if (old && old.parentNode) old.parentNode.removeChild(old);
     const el = document.createElement("div");
     el.id = "quotexbot-hud";
-    el.setAttribute("style", "position:fixed;bottom:12px;right:12px;top:auto;left:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
+    el.setAttribute("style", "position:fixed;bottom:12px;left:12px;top:auto;right:auto;z-index:2147483647;width:380px;height:480px;background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;flex-direction:column;visibility:visible;opacity:1;pointer-events:auto;overflow:hidden;");
     function mount(n) {
       const host = document.body;
       if (!host) {

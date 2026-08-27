@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.23
+quotexbot Chrome MV3 extension  v0.9.24
 =======================================
 
 Load unpacked
@@ -7,7 +7,7 @@ Load unpacked
 2. Turn on Developer mode (top-right)
 3. Click "Load unpacked"
 4. Select the chrome folder (the folder that contains manifest.json)
-5. Open your Quotex DEMO trade tab. The HUD pins bottom-right ON the chart.
+5. Open your Quotex DEMO trade tab. The HUD pins bottom-left ON the chart.
 6. Disable Tampermonkey quotexbot so two HUDs do not stack.
 
 The HUD is English. Pair names, CALL/PUT, and DEMO stay as-is.
