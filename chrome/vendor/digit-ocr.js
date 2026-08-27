@@ -1,5 +1,5 @@
 /**
- * Chart-axis live-tag crop helper (v0.9.37-ext).
+ * Chart-axis live-tag crop helper (v0.9.38-ext).
  * Crops the canvas-right blue/cyan live-price blob and upscales 3x.
  * Primary OCR is Tesseract.js in the offscreen document — this file is
  * NOT the recognizer. Homemade glyph matching is kept but unused.
@@ -685,11 +685,154 @@
     });
   }
 
+  function isTradeBubblePx(r, g, b, a) {
+    if (a < 150) return false;
+    var hsv = rgbToHsv(r, g, b);
+    if (hsv.s < 0.28 || hsv.v < 0.32) return false;
+    if (hsv.h >= 70 && hsv.h <= 175) return true;
+    if (hsv.h <= 22 || hsv.h >= 338) return true;
+    if (g > 130 && g > r + 18 && g > b) return true;
+    if (r > 140 && r > g + 18 && r > b) return true;
+    return false;
+  }
+
+  function cropTradeBubbleStrip(img, rect, dpr) {
+    if (!img || !rect) return null;
+    var left = Number(rect.left), top = Number(rect.top);
+    var width = Number(rect.width), height = Number(rect.height);
+    if (!isFinite(left) || !isFinite(top) || !isFinite(width) || !isFinite(height)) return null;
+    var right = left + width;
+    var bottom = top + height;
+    /* Last candle / open-trade $ bubble sits LEFT of the live-price tag,
+       not in the window-right sidebar. Live tag strip starts ~90px left of
+       canvas right; crop the plot just left of that. */
+    var x0 = Math.round((right - 250) * dpr);
+    var x1 = Math.round((right - 40) * dpr);
+    var y0 = Math.round((top + 12) * dpr);
+    var y1 = Math.round((bottom - 18) * dpr);
+    x0 = clamp(x0, 0, img.width);
+    x1 = clamp(x1, 0, img.width);
+    y0 = clamp(y0, 0, img.height);
+    y1 = clamp(y1, 0, img.height);
+    if (x1 - x0 < 24 || y1 - y0 < 24) return null;
+    return cropImageData(img, x0, y0, x1 - x0, y1 - y0);
+  }
+
+  function findTradeBubbleBlobs(imageData) {
+    var w = imageData.width, h = imageData.height, data = imageData.data;
+    var n = w * h;
+    var seen = new Uint8Array(n);
+    var blobs = [];
+    function isHit(p) {
+      var o = p * 4;
+      return isTradeBubblePx(data[o], data[o + 1], data[o + 2], data[o + 3]);
+    }
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var start = y * w + x;
+        if (seen[start] || !isHit(start)) continue;
+        var stack = [start];
+        seen[start] = 1;
+        var minX = x, maxX = x, minY = y, maxY = y, count = 0;
+        while (stack.length) {
+          var p = stack.pop();
+          var px = p % w, py = (p / w) | 0;
+          count++;
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+          var nbs = [p - 1, p + 1, p - w, p + w];
+          for (var i = 0; i < 4; i++) {
+            var q = nbs[i];
+            if (q < 0 || q >= n) continue;
+            var qx = q % w;
+            if (qx - px > 1 || px - qx > 1) continue;
+            if (seen[q] || !isHit(q)) continue;
+            seen[q] = 1;
+            stack.push(q);
+          }
+        }
+        var bw = maxX - minX + 1, bh = maxY - minY + 1;
+        blobs.push({
+          minX: minX, minY: minY, maxX: maxX, maxY: maxY,
+          w: bw, h: bh, count: count,
+          fill: count / Math.max(1, bw * bh),
+          right: maxX
+        });
+      }
+    }
+    return blobs;
+  }
+
+  function pickTradeBubbleBlobs(blobs, dpr) {
+    dpr = dpr > 0 ? dpr : 1;
+    var minW = 36 * dpr * 0.7;
+    var maxW = 240 * dpr;
+    var minH = 14 * dpr * 0.7;
+    var maxH = 110 * dpr;
+    var good = [];
+    for (var i = 0; i < blobs.length; i++) {
+      var b = blobs[i];
+      if (b.w < minW || b.w > maxW) continue;
+      if (b.h < minH || b.h > maxH) continue;
+      var ar = b.w / Math.max(1, b.h);
+      if (ar < 0.7 || ar > 10) continue;
+      if (b.fill < 0.16) continue;
+      good.push(b);
+    }
+    /* Prefer the rightmost blob (last candle), then largest. */
+    good.sort(function (a, c) {
+      return (c.right - a.right) || (c.count - a.count);
+    });
+    return good;
+  }
+
+  function cropTradeBubbleImageData(img, opts) {
+    opts = opts || {};
+    var dpr = opts.dpr > 0 ? opts.dpr : 1;
+    var strip = cropTradeBubbleStrip(img, opts.rect, dpr);
+    if (!strip) return null;
+    var blobs = pickTradeBubbleBlobs(findTradeBubbleBlobs(strip), dpr);
+    var crop = null;
+    if (blobs.length) {
+      var blob = blobs[0];
+      var padX = Math.max(4, (blob.w * 0.08) | 0);
+      var padY = Math.max(4, (blob.h * 0.12) | 0);
+      crop = cropImageData(
+        strip,
+        blob.minX - padX,
+        blob.minY - padY,
+        blob.w + padX * 2,
+        blob.h + padY * 2
+      );
+    } else {
+      /* No green/red blob: still try the last-candle pocket (right of strip). */
+      var cw = Math.min(strip.width, Math.round(160 * dpr));
+      var ch = Math.min(strip.height, Math.round(140 * dpr));
+      var cx = Math.max(0, strip.width - cw);
+      var cy = Math.max(0, ((strip.height - ch) / 2) | 0);
+      crop = cropImageData(strip, cx, cy, cw, ch);
+    }
+    if (!crop) return null;
+    var up = scaleNearest(crop, crop.height < 40 ? 4 : 3);
+    invertTagToBw(up);
+    return padWhite(up, 8);
+  }
+
+  async function cropTradeBubbleFromPngDataUrl(dataUrl, opts) {
+    var img = await pngToImageData(dataUrl);
+    return cropTradeBubbleImageData(img, opts);
+  }
+
   root.DigitOcr = {
     readPriceFromPngDataUrl: readPriceFromPngDataUrl,
     readPriceFromImageData: readPriceFromImageData,
     cropLiveTagImageData: cropLiveTagImageData,
     cropLiveTagFromPngDataUrl: cropLiveTagFromPngDataUrl,
+    cropTradeBubbleImageData: cropTradeBubbleImageData,
+    cropTradeBubbleFromPngDataUrl: cropTradeBubbleFromPngDataUrl,
+    pngToImageData: pngToImageData,
     imageDataToPngDataUrl: imageDataToPngDataUrl,
     parsePrice: parsePrice,
     findBlueBlobs: findBlueBlobs,

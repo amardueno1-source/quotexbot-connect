@@ -1,11 +1,11 @@
 /**
- * quotexbot MV3 service worker (v0.9.37-ext)
+ * quotexbot MV3 service worker (v0.9.38-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
  *   chrome.tabs.captureVisibleTab → send PNG + chart-canvas rect to the
  *   offscreen document, which crops the SMALL blue/cyan live-price tag
- *   (canvas right −90/+24) and runs Tesseract.js (whitelist 0123456789.,
- *   PSM 7). Wasm cannot run here; OCR is never injected into Quotex.
+ *   (canvas right −90/+24) and the last-candle trade-bubble (MM:SS + $).
+ *   Tesseract.js. Wasm cannot run here; OCR is never injected into Quotex.
  *
  * Visible pixels only. No websocket/HTTP reverse-engineering.
  */
@@ -22,7 +22,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     : null;
   var dpr = Number(msg.dpr) > 0 ? Number(msg.dpr) : 1;
   var rect = parseRect(msg.rect);
-  runCapture(windowId, dpr, rect)
+  var needCd = msg.needCd !== false;
+  runCapture(windowId, dpr, rect, needCd)
     .then(sendResponse)
     .catch(function (err) {
       sendResponse({
@@ -42,14 +43,16 @@ function parseRect(r) {
   return { left: left, top: top, width: width, height: height };
 }
 
-function runCapture(windowId, dpr, rect) {
+function runCapture(windowId, dpr, rect, needCd) {
   var now = Date.now();
   if (inflight) return inflight;
   if (lastPack.resp && now - lastPack.at < 700) {
     return Promise.resolve(lastPack.resp);
   }
-  inflight = captureOcr(windowId, dpr, rect)
+  inflight = captureOcr(windowId, dpr, rect, needCd)
     .then(function (resp) {
+      resp = resp || { ok: false, error: "no tag" };
+      if (!resp.capturedAt) resp.capturedAt = Date.now();
       lastPack = { at: Date.now(), resp: resp };
       return resp;
     })
@@ -112,7 +115,7 @@ function sendOcr(payload) {
   });
 }
 
-function captureOcr(windowId, dpr, rect) {
+function captureOcr(windowId, dpr, rect, needCd) {
   return captureVisible(windowId).then(function (dataUrl) {
     if (!dataUrl) return { ok: false, error: "empty capture" };
     return ensureOffscreen().then(function () {
@@ -120,7 +123,8 @@ function captureOcr(windowId, dpr, rect) {
         type: "quotexbot-ocr",
         dataUrl: dataUrl,
         dpr: dpr,
-        rect: rect
+        rect: rect,
+        needCd: needCd !== false
       };
       return sendOcr(payload).catch(function () {
         return new Promise(function (r) { setTimeout(r, 200); }).then(function () {
@@ -128,14 +132,24 @@ function captureOcr(windowId, dpr, rect) {
         });
       });
     }).then(function (got) {
-      if (!got || !got.ok) return got || { ok: false, error: "no tag" };
+      got = got || { ok: false, error: "no tag" };
       var v = got.v;
       var text = got.text ? String(got.text) : "";
+      var resp;
       if (v == null || !isFinite(v) || v < 0.05) {
-        return { ok: false, error: "no tag", text: text };
+        resp = { ok: false, error: got.error || "no tag" };
+        if (text) resp.text = text;
+      } else {
+        resp = { ok: true, v: v };
+        if (text) resp.text = text;
       }
-      var resp = { ok: true, v: v };
-      if (text) resp.text = text;
+      if (got.cdSec != null && isFinite(Number(got.cdSec)) && Number(got.cdSec) > 0) {
+        resp.cdSec = Number(got.cdSec);
+        if (got.cdText) resp.cdText = String(got.cdText);
+        if (got.cdMoney) resp.cdMoney = true;
+      } else if (got.cdText) {
+        resp.cdText = String(got.cdText);
+      }
       return resp;
     });
   });

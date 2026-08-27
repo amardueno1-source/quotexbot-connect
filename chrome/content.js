@@ -1,14 +1,15 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.37-ext)
+ * quotexbot Chrome MV3 content script (v0.9.38-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  *
  * Live price: screenshot the visible DEMO tab, crop the CHART-AXIS blue
  * last-price tag (right edge of the largest visible canvas, left of the
- * trade sidebar — not the window-right 110px). Tesseract.js OCRs that
- * SMALL blob in an offscreen document. Hit-test is fallback if it ever
- * works. Never click (i), pair name, or PAIR INFORMATION.
+ * trade sidebar — not the window-right 110px). Open-trade 00:05 is OCRd
+ * from the last-candle $ bubble (left of the live-price tag). Tesseract.js
+ * OCRs those SMALL crops in an offscreen document. Hit-test is fallback.
+ * Never click (i), pair name, or PAIR INFORMATION.
  * Price Now is used only if that popup is already open.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
@@ -342,15 +343,37 @@
   function setControlValue(el, value) {
     if (!el) return false;
     const str = String(value);
+    try { el.focus && el.focus(); } catch (_f) {}
     if ("value" in el) {
-      el.value = str;
-      el.dispatchEvent && el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent && el.dispatchEvent(new Event("change", { bubbles: true }));
+      try {
+        const proto = Object.getPrototypeOf(el);
+        let desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+        if (!desc) {
+          try { desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value"); } catch (_d0) {}
+        }
+        if (!desc) {
+          try { desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value"); } catch (_d1) {}
+        }
+        if (desc && desc.set) desc.set.call(el, str);
+        else el.value = str;
+      } catch (_e) {
+        el.value = str;
+      }
+      try {
+        if (typeof InputEvent === "function") {
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, data: str, inputType: "insertText" }));
+        } else {
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      } catch (_e2) {
+        try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e3) {}
+      }
+      try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (_e4) {}
       return true;
     }
     if (el.getAttribute && el.getAttribute("contenteditable") === "true") {
       el.textContent = str;
-      el.dispatchEvent && el.dispatchEvent(new Event("input", { bubbles: true }));
+      try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e5) {}
       return true;
     }
     return false;
@@ -495,7 +518,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.37-ext",
+    version: "0.9.38-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -516,6 +539,12 @@
     emaSep: 0.00003,
     rsiCall: [48, 68],
     rsiPut: [32, 52],
+    mmPct: 0.01,
+    mmReducePct: 0.005,
+    mmMin: 1,
+    mmMax: 200,
+    mmCapPct: 0.02,
+    mmReduceAfterLosses: 2,
     ranges: {
       "USD/JPY": [90, 220],
       "EUR/JPY": [120, 240],
@@ -567,6 +596,7 @@
   let lastMissLogAt = 0;
   let lastMissSig = "";
   let lastCanvasOcr = { v: null, at: 0 };
+  let lastCanvasCd = { sec: null, at: 0, text: "", money: false };
   let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
@@ -1585,6 +1615,7 @@
     lastPairInfoClickPair = "";
     lastAssetListDismissAt = 0;
     lastCanvasOcr = { v: null, at: 0 };
+    lastCanvasCd = { sec: null, at: 0, text: "", money: false };
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
     try { if (axisObs) axisObs.disconnect(); } catch (_e2) {}
     if (reason) log(reason);
@@ -2142,6 +2173,7 @@
   let lastObservedPx = null;
   let lastPreClickBal = null;
   let lastPreClickStake = null;
+  let lastMmAppliedStake = null;
   function parseMoneyNum(t) {
     const n = parseFloat(String(t || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
     return isFinite(n) ? n : null;
@@ -2207,6 +2239,173 @@
       }
     } catch (_e1) {}
     return null;
+  }
+  function findInvestmentInput() {
+    if (!scrape || typeof scrape.findLabeledInput !== "function") return null;
+    return scrape.findLabeledInput(document, /investment|amount|stake|инвест|сумма|cantidad|valor|ইনভেস্ট|বিনিয়োগ/i);
+  }
+  function investmentLooksPercent(el) {
+    if (!el) return false;
+    let blob = "";
+    try {
+      let n = el;
+      for (let i = 0; i < 5 && n; i++) {
+        blob += " " + (typeof widgetText === "function" ? widgetText(n) : String(n.innerText || n.textContent || ""));
+        n = n.parentElement;
+      }
+    } catch (_e) {}
+    const raw = (el.value != null ? String(el.value) : "") || (el.textContent || "");
+    const v = parseMoneyNum(raw);
+    const hasPct = /%/.test(blob);
+    const hasDollar = /\$/.test(blob);
+    if (hasPct && !hasDollar) return true;
+    if (hasPct && v != null && v > 0 && v <= 20 && /investment|amount|stake/i.test(blob)) return true;
+    return false;
+  }
+  function clickSwitchInvestment() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const fromEl = findInvestmentInput();
+    let panel = fromEl;
+    for (let i = 0; i < 6 && panel && panel.parentElement; i++) {
+      const t = typeof widgetText === "function" ? widgetText(panel) : "";
+      if (t && t.length > 90) break;
+      panel = panel.parentElement;
+    }
+    const nodes = [];
+    function collect(root) {
+      if (!root || !root.querySelectorAll) return;
+      try {
+        const list = root.querySelectorAll("button, [role='button'], a, span, div, label, p");
+        for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+      } catch (_e) {}
+    }
+    if (panel) collect(panel);
+    try {
+      forEachRoot(function (root) { collect(root); });
+    } catch (_e0) {}
+    let best = null, bestScore = -1e9;
+    const wide = window.innerWidth || 1200;
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (fromEl && el === fromEl) continue;
+      const t = typeof widgetText === "function" ? widgetText(el) : String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 48) continue;
+      if (/\bpending\s*trade\b/i.test(t) || /\bpending\b/i.test(t)) continue;
+      if (/switch\s*time/i.test(t)) continue;
+      if (/time|expiry|duration/i.test(t) && !/invest|amount|stake/i.test(t)) continue;
+      let kind = 0;
+      const compact = t.replace(/\s+/g, " ").trim();
+      if (/^\$|USD/i.test(compact) && compact.length <= 8) kind = 4;
+      else if (/switch/i.test(t) && /invest|amount|stake|percent|\$/i.test(t)) kind = 3;
+      else if (/^switch$/i.test(compact)) kind = 2;
+      else continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+      if (!r || r.width < 4 || r.height < 4) continue;
+      const right = r.left > wide * 0.45 ? 50 : 0;
+      const score = kind * 100 + right - r.top * 0.01;
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    if (!best) return false;
+    try {
+      if (typeof best.click === "function") best.click();
+      else if (typeof realishClick === "function") realishClick(best);
+    } catch (_e2) { return false; }
+    log("Investment SWITCH → $");
+    return true;
+  }
+  function setInvestmentField(dollars) {
+    const str = String(Math.floor(Number(dollars) || 1));
+    let el = null;
+    try { el = findInvestmentInput(); } catch (_e0) { el = null; }
+    if (!el) return false;
+    try {
+      if (scrape && typeof scrape.setControlValue === "function") scrape.setControlValue(el, str);
+      else {
+        el.value = str;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    } catch (_e1) { return false; }
+    const got = parseMoneyNum((el.value != null ? String(el.value) : "") || (el.textContent || ""));
+    return got != null && Math.abs(got - Number(str)) < 0.51;
+  }
+  function mmLossStreak() {
+    const j = state.journal || [];
+    let n = 0;
+    for (let i = j.length - 1; i >= 0; i--) {
+      const r = j[i];
+      if (!r || !r.ok) continue;
+      if (!r.result) continue;
+      if (r.result === "win") break;
+      if (r.result === "loss") n += 1;
+      else break;
+    }
+    return n;
+  }
+  function computeMmStake() {
+    const need = Number(CONFIG.mmReduceAfterLosses) || 2;
+    const reduced = mmLossStreak() >= need;
+    const pct = reduced ? (Number(CONFIG.mmReducePct) || 0.005) : (Number(CONFIG.mmPct) || 0.01);
+    const pctLabel = reduced ? "0.5%" : "1%";
+    let bal = null;
+    try { bal = readPlatformBalance(); } catch (_e) { bal = null; }
+    const minS = Math.max(1, Math.floor(Number(CONFIG.mmMin) || 1));
+    const maxS = Math.max(minS, Math.floor(Number(CONFIG.mmMax) || 200));
+    const capPct = Number(CONFIG.mmCapPct) || 0.02;
+    if (bal == null || !isFinite(bal) || bal < 1) {
+      let kept = Math.floor(Number(state.lastMmStake) || 0);
+      if (kept < minS) kept = minS;
+      if (kept > maxS) kept = maxS;
+      return { stake: kept, pctLabel: pctLabel, bal: null, unread: true, reduced: reduced };
+    }
+    let s = Math.floor(bal * pct);
+    const cap2 = Math.floor(bal * capPct);
+    if (s > maxS) s = maxS;
+    if (s > cap2) s = cap2;
+    if (s < minS) s = minS;
+    if (reduced) {
+      const prev = Math.floor(Number(state.lastMmStake) || 0);
+      if (prev >= minS && s > prev) s = prev;
+    }
+    return { stake: s, pctLabel: pctLabel, bal: bal, unread: false, reduced: reduced };
+  }
+  function mmHudText() {
+    const mm = computeMmStake();
+    return "$" + mm.stake + " · " + mm.pctLabel;
+  }
+  async function ensureDollarInvestment() {
+    let el = null;
+    try { el = findInvestmentInput(); } catch (_e0) {}
+    if (!investmentLooksPercent(el)) return;
+    const switched = clickSwitchInvestment();
+    if (switched) await sleep(300);
+  }
+  async function applyMoneyManagement() {
+    const mm = computeMmStake();
+    let pctMode = false;
+    try { pctMode = investmentLooksPercent(findInvestmentInput()); } catch (_e0) { pctMode = false; }
+    if (pctMode) {
+      try { await ensureDollarInvestment(); } catch (_e1) {}
+      try { pctMode = investmentLooksPercent(findInvestmentInput()); } catch (_e2) {}
+    }
+    if (pctMode) {
+      log("MM stake $" + mm.stake + " skipped set — Investment still %");
+      lastMmAppliedStake = null;
+    } else {
+      try { setInvestmentField(mm.stake); } catch (_e3) {}
+      lastMmAppliedStake = mm.stake;
+    }
+    state.lastMmStake = mm.stake;
+    state.lastMmPct = mm.pctLabel;
+    if (mm.unread) {
+      log("MM stake $" + mm.stake + " (balance unread, kept last)");
+    } else {
+      log("MM stake $" + mm.stake + " (" + mm.pctLabel + " of " + String(Math.floor(mm.bal)) + ")");
+    }
   }
   function capturePreClickMoney() {
     try { lastPreClickBal = readPlatformBalance(); } catch (_e0) { lastPreClickBal = null; }
@@ -2301,10 +2500,14 @@
       const pair = pm[1].toUpperCase() + "/" + pm[2].toUpperCase();
       const dir = dirFromText(t);
       let hasCd = false;
+      let cdSec = null;
       const cd = t.match(/\b(\d{1,2}):(\d{2})\b/);
       if (cd) {
         const mm = parseInt(cd[1], 10), ss = parseInt(cd[2], 10);
-        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15 && (mm * 60 + ss) > 0) hasCd = true;
+        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15 && (mm * 60 + ss) > 0) {
+          hasCd = true;
+          cdSec = mm * 60 + ss;
+        }
       }
       const open = hasCd || /\b(open|pending)\b/i.test(t);
       let stake = 0, payout = 0, chip = null;
@@ -2339,10 +2542,11 @@
         dir: dir,
         stake: stake,
         payout: payout,
-        win: !!(chip && chip.win),
+        win: !!(chip && chip.win) && !hasCd,
         pnl: chip ? chip.pnl : null,
-        open: open && !(chip && chip.win),
-        settled: settled,
+        cdSec: cdSec,
+        open: hasCd || (open && !(chip && chip.win)),
+        settled: settled && !hasCd,
         t: t.slice(0, 120),
       });
     }
@@ -2619,7 +2823,73 @@
     }
     return false;
   }
-  function screenCountdownSec() {
+  function parseTradeCdSec(text) {
+    const t = String(text || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    if (!t) return null;
+    let bestMoney = null, bestZero = null;
+    const re = /(\d{1,2}):(\d{2})(?!:\d)/g;
+    let m;
+    while ((m = re.exec(t))) {
+      const idx = m.index;
+      if (idx >= 3 && /\d/.test(t.charAt(idx - 3)) && t.charAt(idx - 2) === ":") continue;
+      const mm = parseInt(m[1], 10);
+      const ss = parseInt(m[2], 10);
+      if (!isFinite(mm) || !isFinite(ss) || ss > 59 || mm >= 15) continue;
+      const total = mm * 60 + ss;
+      if (total <= 0 || total > 600) continue;
+      const ctx = t.slice(Math.max(0, idx - 18), Math.min(t.length, idx + m[0].length + 10));
+      const hasMoney = /\$|\d\s*\$/.test(ctx);
+      if (hasMoney) {
+        if (bestMoney == null || total < bestMoney) bestMoney = total;
+      } else if (mm === 0) {
+        if (bestZero == null || total < bestZero) bestZero = total;
+      }
+    }
+    if (bestMoney == null) {
+      const loose = t.match(/(?:[++\u2212\-]\s*)?(?:\$\s*)?\d+(?:\.\d+)?\s*\$?\s+(\d{1,2})[.:](\d{2})/);
+      if (loose) {
+        const mm = parseInt(loose[1], 10), ss = parseInt(loose[2], 10);
+        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15) {
+          const total = mm * 60 + ss;
+          if (total > 0 && total <= 600) bestMoney = total;
+        }
+      }
+    }
+    if (bestMoney != null) return bestMoney;
+    if (bestZero != null) return bestZero;
+    return null;
+  }
+  function tradesListCountdownSec() {
+    try {
+      const rows = listTradeRows();
+      let best = null;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || !r.open) continue;
+        let s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
+        if (s == null || !isFinite(s) || s <= 0) continue;
+        if (best == null || s < best) best = s;
+      }
+      return best;
+    } catch (_e) {
+      return null;
+    }
+  }
+  function canvasCountdownSec() {
+    if (lastCanvasCd.sec == null || !lastCanvasCd.at) return null;
+    const elapsed = (Date.now() - lastCanvasCd.at) / 1000;
+    if (elapsed > 6) return null;
+    const left = Math.round(Number(lastCanvasCd.sec) - elapsed);
+    if (!isFinite(left) || left <= 0) return null;
+    return left;
+  }
+  function canvasDollarBubbleOpen() {
+    if (!lastCanvasCd.at || !lastCanvasCd.money) return false;
+    if (Date.now() - lastCanvasCd.at > 4000) return false;
+    if (canvasCountdownSec() != null) return true;
+    return Date.now() - lastCanvasCd.at < 2500;
+  }
+  function domCountdownSec() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
     const timeRaw = timeWidgetRaw();
@@ -2629,13 +2899,13 @@
     try {
       forEachRoot(function (root) {
         try {
-          const list = root.querySelectorAll("div, span, b, strong, p, label, text, tspan, em");
+          const list = root.querySelectorAll("div, span, b, strong, p, label, text, tspan, em, li");
           for (let i = 0; i < list.length; i++) nodes.push(list[i]);
         } catch (_e0) {}
       });
     } catch (_e1) {
       try {
-        const list = document.querySelectorAll("div, span, b, strong, p, label");
+        const list = document.querySelectorAll("div, span, b, strong, p, label, li");
         for (let i = 0; i < list.length; i++) nodes.push(list[i]);
       } catch (_e2) {}
     }
@@ -2645,29 +2915,38 @@
       if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
       let t = "";
       try { t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e3) { continue; }
-      if (!t || t.length > 32) continue;
-      if (/\b\d{2}:\d{2}:\d{2}\b/.test(t)) continue;
+      if (!t) continue;
+      const hasMoneyCd = /\$/.test(t) && /\d{1,2}:\d{2}/.test(t);
+      if (t.length > 32 && !hasMoneyCd) continue;
+      if (t.length > 120) continue;
+      if (/\b\d{2}:\d{2}:\d{2}\b/.test(t) && !hasMoneyCd) continue;
       const compact = t.replace(/\s+/g, "");
       if (timeRaw && compact === timeRaw) continue;
       if (elLooksLikeTimePanel(el)) continue;
-      const m = t.match(/\b(\d{1,2}):(\d{2})\b/);
-      if (!m) continue;
-      const mm = parseInt(m[1], 10);
-      const ss = parseInt(m[2], 10);
-      if (!isFinite(mm) || !isFinite(ss) || ss > 59 || mm >= 15) continue;
-      /* wall-clock Time panel (22:17) is not an open-trade countdown */
-      if (mm >= 1 && !/\$/.test(t) && isClockExpiryValue(compact)) continue;
-      const total = mm * 60 + ss;
-      if (total <= 0) continue;
-      const hasMoney = /\$|\d\s*\$/.test(t);
-      if (hasMoney) {
-        if (bestMoney == null || total < bestMoney) bestMoney = total;
-      } else if (mm === 0) {
-        if (bestZero == null || total < bestZero) bestZero = total;
+      const got = parseTradeCdSec(t);
+      if (got == null) continue;
+      if (got >= 60 && !/\$/.test(t) && isClockExpiryValue(compact)) continue;
+      if (/\$|\d\s*\$/.test(t)) {
+        if (bestMoney == null || got < bestMoney) bestMoney = got;
+      } else if (got < 60) {
+        if (bestZero == null || got < bestZero) bestZero = got;
       }
     }
     if (bestMoney != null) return bestMoney;
-    if (bestZero != null) return bestZero;
+    try {
+      const rowCd = tradesListCountdownSec();
+      if (rowCd != null && rowCd > 0) return rowCd;
+    } catch (_eR) {}
+    /* Do not use bare 00:SS — that is the candle timer, not the $ trade bubble. */
+    return null;
+  }
+  function screenCountdownSec() {
+    let dom = null;
+    try { dom = domCountdownSec(); } catch (_e0) { dom = null; }
+    if (dom != null && dom > 0) return dom;
+    let cv = null;
+    try { cv = canvasCountdownSec(); } catch (_e1) { cv = null; }
+    if (cv != null && cv > 0) return cv;
     return null;
   }
   function pnlAlreadyUsed(used, n) {
@@ -2688,9 +2967,12 @@
   function settlePendingJournal() {
     if (!Array.isArray(state.journal) || !state.journal.length) return;
     const now = Date.now();
+    let liveOpen = false;
+    try { liveOpen = realTradeOpenNow(); } catch (_e0) { liveOpen = false; }
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
-    const countingDown = cd != null && cd > 1;
+    const countingDown = liveOpen || (cd != null && cd > 0);
+    if (countingDown) return;
     const used = {};
     for (let i = 0; i < state.journal.length; i++) {
       const r = state.journal[i];
@@ -2725,8 +3007,15 @@
       const pre = Number(row.bal);
       const hasPre = isFinite(pre) && pre > 0;
 
-      /* 1) Newest settled Trades row for THIS pair+direction+stake. Win chip wins. */
-      if (match && match.win && !match.open) {
+      let stillHolding = false;
+      if (hasPre && balNow != null && stake > 0) {
+        const down0 = round2(pre - balNow);
+        stillHolding = Math.abs(down0 - stake) < 0.08 || (down0 > 0.04 && balNow < pre - 0.04);
+      }
+
+      /* 1) Newest settled Trades row for THIS pair+direction+stake. Win chip wins.
+         Never log Profit while this trade's stake is still reserved. */
+      if (!stillHolding && match && match.win && !match.open) {
         const pnl = profitFrom(row, match);
         if (applyJournalResult(row, "win", pnl, false)) {
           changed = true;
@@ -2736,7 +3025,7 @@
       }
 
       /* 2) Platform balance rose vs pre-click after expiry → win (pnl = delta / payout-stake). */
-      if (hasPre && balNow != null && age >= dur) {
+      if (!stillHolding && hasPre && balNow != null && age >= dur) {
         const delta = round2(balNow - pre);
         if (delta > 0.04) {
           if (applyJournalResult(row, "win", delta, false)) {
@@ -2759,7 +3048,7 @@
           winSnip = snips[k];
           break;
         }
-        if (winSnip && !(match && match.open)) {
+        if (!stillHolding && winSnip && !(match && match.open)) {
           const pnl = profitFrom(row, winSnip);
           if (applyJournalResult(row, "win", pnl, false)) {
             changed = true;
@@ -3037,7 +3326,12 @@
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
     if (cd != null && cd > 0) return true;
+    try { if (canvasDollarBubbleOpen()) return true; } catch (_e1) {}
     try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
+    try {
+      const rowCd = tradesListCountdownSec();
+      if (rowCd != null && rowCd > 0) return true;
+    } catch (_e3) {}
     return false;
   }
   function pendingJournal() {
@@ -3047,6 +3341,7 @@
     return true;
   }
   function cooldownLeftMs() {
+    try { if (realTradeOpenNow()) return 0; } catch (_e0) {}
     const last = lastOkJournal();
     if (!last || !last.result) return 0;
     if ((last.t || 0) < bootAt) return 0;
@@ -3065,10 +3360,37 @@
     if (cooldownLeftMs() > 0) return true;
     return false;
   }
+  function liveOcrAgeMs() {
+    if (lastCanvasOcr && lastCanvasOcr.v != null && lastCanvasOcr.at) {
+      return Date.now() - lastCanvasOcr.at;
+    }
+    return 1e9;
+  }
+  function priceOcrFresh() {
+    return liveOcrAgeMs() < 2000;
+  }
+  async function waitForFreshOcr(ms) {
+    if (priceOcrFresh()) return true;
+    try { requestCanvasCapture(); } catch (_e0) {}
+    const t0 = Date.now();
+    const lim = ms == null ? 1600 : ms;
+    while (Date.now() - t0 < lim) {
+      if (priceOcrFresh()) return true;
+      await sleep(120);
+    }
+    return priceOcrFresh();
+  }
+  function expiryTooClose() {
+    let cd = null;
+    try { cd = screenCountdownSec(); } catch (_e) { cd = null; }
+    if (cd != null && cd > 0 && cd <= 8) return true;
+    return false;
+  }
   function tradeWaitSec() {
     let cd = null;
     try { cd = screenCountdownSec(); } catch (_e) {}
     if (cd != null && cd > 0) return cd;
+    try { if (realTradeOpenNow()) return 1; } catch (_e2) {}
     const last = lastOkJournal();
     if (last && !last.result && (last.t || 0) >= bootAt) {
       const dur = saneDurMs(last.durMs);
@@ -3156,12 +3478,19 @@
     const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
+    try { if (expiryTooClose()) return { ok: false, error: "Trade open, skip" }; } catch (_eEx) {}
     try { await ensureDurationMode(); } catch (_eDur) {}
+    if (snap.accountMode === "demo") {
+      try { await applyMoneyManagement(); } catch (_eMm) {}
+    }
     if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
+    try { if (expiryTooClose()) return { ok: false, error: "Trade open, skip" }; } catch (_eEx2) {}
     capturePreClickMoney();
+    if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
     clickLock = true;
     try {
-      const r = dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
+      const opts = lastMmAppliedStake != null ? { stake: String(lastMmAppliedStake) } : {};
+      const r = dir === "down" ? scrape.clickDown(document, opts) : scrape.clickUp(document, opts);
       if (!r || !r.ok) clickLock = false;
       return r;
     } catch (err) {
@@ -3198,6 +3527,14 @@
         saveState(state); render();
         return;
       }
+      try {
+        if (expiryTooClose()) {
+          state.lastReason = "Trade open, wait " + tradeWaitSec() + "s";
+          log("Trade open, skip");
+          saveState(state); render();
+          return;
+        }
+      } catch (_eEx0) {}
 
       const vis = visiblePair();
       const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;
@@ -3258,9 +3595,17 @@
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
       if (tradeOpen()) { log("Trade open, skip"); return; }
+      try { if (expiryTooClose()) { log("Trade open, skip"); return; } } catch (_eEx1) {}
 
       await sleep(400 + Math.floor(Math.random() * 600));
       if (tradeOpen()) { log("Trade open, skip"); return; }
+      try { if (expiryTooClose()) { log("Trade open, skip"); return; } } catch (_eEx2) {}
+      if (!(await waitForFreshOcr(1600))) {
+        state.lastReason = "Price stale, skip";
+        log("Price stale, skip");
+        saveState(state); render();
+        return;
+      }
       const r = await clickDir(d.signal === "PUT" ? "down" : "up");
       if (r && r.error === "Trade open, skip") { log("Trade open, skip"); return; }
       let durLabel = "1m";
@@ -3615,6 +3960,7 @@
         <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="row"><span>Account</span><b>${(function(){ const s = tradeStats(); return s.total + " trades · Profit " + s.wins + " · Loss " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
+        <div class="row"><span>Stake</span><b>${mmHudText()}</b></div>
         <div class="btns">
           <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>Up</button>
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>Down</button>
@@ -3819,11 +4165,12 @@
     lastCaptureAt = now;
     captureBusy = true;
     const dpr = window.devicePixelRatio || 1;
-    const msg = { type: "capture", dpr: dpr };
+    const msg = { type: "capture", dpr: dpr, needCd: true };
     try {
       const rect = chartCanvasRectCss();
       if (rect) msg.rect = rect;
     } catch (_eR) {}
+    try { msg.needCd = (domCountdownSec() == null); } catch (_eN) { msg.needCd = true; }
     const failsafe = setTimeout(function () { captureBusy = false; }, 8000);
     try {
       chrome.runtime.sendMessage(
@@ -3833,6 +4180,15 @@
           try { clearTimeout(failsafe); } catch (_eC) {}
           let err = null;
           try { err = chrome.runtime.lastError; } catch (_e0) {}
+          const at = Number(resp && resp.capturedAt) || Date.now();
+          if (resp && resp.cdSec != null && Number(resp.cdSec) > 0) {
+            lastCanvasCd = {
+              sec: Number(resp.cdSec),
+              at: at,
+              text: resp.cdText ? String(resp.cdText) : "",
+              money: !!resp.cdMoney
+            };
+          }
           if (err || !resp || !resp.ok || resp.v == null) {
             try { onQuoteTick(); } catch (_eM) {}
             return;
@@ -3842,7 +4198,7 @@
             try { onQuoteTick(); } catch (_eM2) {}
             return;
           }
-          lastCanvasOcr = { v: v, at: Date.now(), text: resp.text ? String(resp.text) : "" };
+          lastCanvasOcr = { v: v, at: at, text: resp.text ? String(resp.text) : "" };
           try { onQuoteTick(); } catch (_e1) {}
         }
       );
