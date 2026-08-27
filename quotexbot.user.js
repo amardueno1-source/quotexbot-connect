@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.30
+// @version      0.9.31
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.30",
+    version: "0.9.31",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1180,11 +1180,32 @@ if (window.__quotexbotAbortInstalled) {
       diag.axis = lastAxisScanN;
       diag.cand = all.length;
     }
-    function ok(v) {
+    function quoteDecimals(v, text) {
+      if (text) {
+        const m = String(text).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
+        if (m) return m[1].length;
+      }
+      const t = String(v);
+      const i = t.indexOf(".");
+      return i < 0 ? 0 : t.length - i - 1;
+    }
+    function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
       if (isPnlNumber(v)) return false;
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
+      let text = null, dec = null;
+      if (typeof info === "string") text = info;
+      else if (info && typeof info === "object") {
+        if (info.text) text = info.text;
+        if (info.decimals != null) dec = info.decimals;
+      }
+      if (dec == null) dec = quoteDecimals(v, text);
+      if (v < 2 && dec < 4) return false;
+      if (state.lastGoodPx != null) {
+        const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
+        if (rel > 0.01) return false;
+      }
       return true;
     }
     const axisOk = !!(axis && ok(axis.v, axis));
