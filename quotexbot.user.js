@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.0
+// @version      0.9.1
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.0";
+  const FILE_VER = "0.9.1";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.0",
+    version: "0.9.1",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -1706,15 +1706,6 @@ if (window.__quotexbotAbortInstalled) {
     return url + (url.indexOf("?") >= 0 ? "&" : "?") + "cb=" + Date.now();
   }
 
-  function clearOldCache() {
-    try {
-      for (let i = sessionStorage.length - 1; i >= 0; i--) {
-        const k = sessionStorage.key(i);
-        if (k && k.indexOf("quotexbot_") === 0) sessionStorage.removeItem(k);
-      }
-    } catch (_e) {}
-  }
-
   function savePayload(txt, ver) {
     try {
       if (typeof GM_setValue === "function") {
@@ -1727,6 +1718,8 @@ if (window.__quotexbotAbortInstalled) {
   function checkRemoteVersion() {
     const url = CONFIG.updateUrl;
     if (!url) return;
+    let alreadyReload = false;
+    try { alreadyReload = sessionStorage.getItem("quotexbot_did_reload") === "1"; } catch (_e0) {}
     function done(txt) {
       const raw = String(txt || "");
       const m = raw.match(/@version\s+([0-9.]+)/);
@@ -1734,15 +1727,16 @@ if (window.__quotexbotAbortInstalled) {
       const remote = m[1];
       if (!verNewer(remote, CONFIG.version)) return;
       log("GitHub-এ নতুন v" + remote + " (এখন v" + CONFIG.version + ")");
-      state.lastReason = "আপডেট v" + remote + " · ক্যাশ ক্লিয়ার";
       savePayload(raw, remote);
-      clearOldCache();
-      const key = "quotexbot_reloaded_" + remote;
-      let already = false;
-      try { already = sessionStorage.getItem(key) === "1"; } catch (_e) {}
-      if (CONFIG.autoReloadOnUpdate && !already) {
-        try { sessionStorage.setItem(key, "1"); } catch (_e2) {}
-        log("পুরনো ক্যাশ কাটা, নতুন v" + remote + " রিফ্রেশ");
+      if (alreadyReload) {
+        state.lastReason = "v" + remote + " আছে · Tampermonkey Reinstall";
+        log("রিফ্রেশ লুপ বন্ধ। Tampermonkey থেকে Reinstall করো v" + remote);
+        render();
+        return;
+      }
+      if (CONFIG.autoReloadOnUpdate) {
+        try { sessionStorage.setItem("quotexbot_did_reload", "1"); } catch (_e2) {}
+        log("একবার রিফ্রেশ, তারপর আর ঘুরবে না");
         location.reload();
         return;
       }
@@ -1766,9 +1760,7 @@ if (window.__quotexbotAbortInstalled) {
     } catch (_e4) {}
   }
 
-  checkRemoteVersion();
-  setTimeout(checkRemoteVersion, 5000);
-  setTimeout(checkRemoteVersion, 30000);
+  setTimeout(checkRemoteVersion, 8000);
   setInterval(checkRemoteVersion, CONFIG.checkUpdateMs);
 
   log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
