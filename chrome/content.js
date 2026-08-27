@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.35-ext)
+ * quotexbot Chrome MV3 content script (v0.9.36-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -495,7 +495,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.35-ext",
+    version: "0.9.36-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -647,17 +647,17 @@
     if (state.journal.length > 80) state.journal = state.journal.slice(-80);
   }
 
+  const bootAt = Date.now();
   let lastClickAt = 0;
   let clickLock = false;
-  if (Array.isArray(state.journal)) {
-    for (let i = state.journal.length - 1; i >= 0; i--) {
-      if (state.journal[i] && state.journal[i].ok && state.journal[i].t) {
-        lastClickAt = state.journal[i].t;
-        break;
-      }
-    }
-  }
+  let staleBusyCleared = false;
+  let durationEnsuredOnce = false;
   let scanning = false;
+  try {
+    if (state.lastReason && /trade open|cooldown|wait \d+\s*s/i.test(String(state.lastReason))) {
+      state.lastReason = "";
+    }
+  } catch (_eR0) {}
   let browseIndex = 0;
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -2275,9 +2275,30 @@
   function readExpiryMs() {
     return tfToMs(readExpiryLabel());
   }
+  function timeWidgetRaw() {
+    try { return String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_e) { return ""; }
+  }
+  function elLooksLikeTimePanel(el) {
+    let n = el;
+    for (let i = 0; i < 4 && n && n.nodeType === 1; i++) {
+      let r = null;
+      try { r = n.getBoundingClientRect(); } catch (_eR) {}
+      if (r && (r.height > 90 || r.width > 320)) { n = n.parentElement; continue; }
+      let t = "";
+      try { t = String(n.innerText || n.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e0) { t = ""; }
+      if (t && t.length < 48 && TIME_LABELS.test(t) && !/\$/.test(t)) return true;
+      try {
+        const lab = String((n.getAttribute && (n.getAttribute("aria-label") || n.getAttribute("placeholder") || n.getAttribute("name"))) || "");
+        if (lab && TIME_LABELS.test(lab)) return true;
+      } catch (_e1) {}
+      n = n.parentElement;
+    }
+    return false;
+  }
   function screenCountdownSec() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
+    const timeRaw = timeWidgetRaw();
     let bestMoney = null;
     let bestZero = null;
     const nodes = [];
@@ -2302,12 +2323,18 @@
       try { t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e3) { continue; }
       if (!t || t.length > 32) continue;
       if (/\b\d{2}:\d{2}:\d{2}\b/.test(t)) continue;
+      const compact = t.replace(/\s+/g, "");
+      if (timeRaw && compact === timeRaw) continue;
+      if (elLooksLikeTimePanel(el)) continue;
       const m = t.match(/\b(\d{1,2}):(\d{2})\b/);
       if (!m) continue;
       const mm = parseInt(m[1], 10);
       const ss = parseInt(m[2], 10);
       if (!isFinite(mm) || !isFinite(ss) || ss > 59 || mm >= 15) continue;
+      /* wall-clock Time panel (22:17) is not an open-trade countdown */
+      if (mm >= 1 && !/\$/.test(t) && isClockExpiryValue(compact)) continue;
       const total = mm * 60 + ss;
+      if (total <= 0) continue;
       const hasMoney = /\$|\d\s*\$/.test(t);
       if (hasMoney) {
         if (bestMoney == null || total < bestMoney) bestMoney = total;
@@ -2541,22 +2568,78 @@
     }
     if (switched) await sleep(150);
   }
+  function platformHasOpenTrade() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const timeRaw = timeWidgetRaw();
+    const wide = window.innerWidth || 1200;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("div, span, li, p, b, strong, label");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e0) {}
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (elLooksLikeTimePanel(el)) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+      if (!r || r.width < 8 || r.height < 8 || r.left < wide * 0.52) continue;
+      let t = "";
+      try { t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
+      if (!t || t.length > 96) continue;
+      const compact = t.replace(/\s+/g, "");
+      if (timeRaw && compact === timeRaw) continue;
+      if (/\bpending\s*trade\b/i.test(t)) continue;
+      if (/\b\d{2}:\d{2}:\d{2}\b/.test(t)) continue;
+      const cdMatch = t.match(/\b(\d{1,2}):(\d{2})\b/);
+      let cdOk = false;
+      if (cdMatch) {
+        const mm = parseInt(cdMatch[1], 10);
+        const ss = parseInt(cdMatch[2], 10);
+        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15) {
+          if (mm === 0 && ss > 0) cdOk = true;
+          else if (/\$/.test(t)) cdOk = true;
+        }
+      }
+      const hasStake = /\$\s*\d|\d(?:\.\d+)?\s*\$/.test(t);
+      const hasDir = /\b(call|put|up|down|higher|lower)\b/i.test(t);
+      const settledOnly = /(?:^|[+\u2212\-])\s*\$?\s*\d+(?:\.\d+)?\s*\$/.test(t) && !cdOk;
+      if (settledOnly) continue;
+      if (cdOk && (hasStake || hasDir || /\$/.test(t))) return true;
+      if (/\bopen\b/i.test(t) && (hasStake || hasDir || cdOk)) return true;
+    }
+    return false;
+  }
+  function realTradeOpenNow() {
+    let cd = null;
+    try { cd = screenCountdownSec(); } catch (_e) {}
+    if (cd != null && cd > 0) return true;
+    try { if (platformHasOpenTrade()) return true; } catch (_e2) {}
+    return false;
+  }
   function pendingJournal() {
     const last = lastOkJournal();
-    return !!(last && !last.result);
+    if (!(last && !last.result)) return false;
+    if ((last.t || 0) < bootAt) return false;
+    return true;
   }
   function cooldownLeftMs() {
     const last = lastOkJournal();
     if (!last || !last.result) return 0;
+    if ((last.t || 0) < bootAt) return 0;
     const from = last.settledAt || ((last.t || 0) + saneDurMs(last.durMs));
     const left = (CONFIG.cooldownMs || 65000) - (Date.now() - from);
     return left > 0 ? left : 0;
   }
   function tradeBusy() {
     if (clickLock) return true;
-    let cd = null;
-    try { cd = screenCountdownSec(); } catch (_e) {}
-    if (cd != null && cd > 0) return true;
+    if (realTradeOpenNow()) return true;
     if (pendingJournal()) return true;
     return false;
   }
@@ -2570,11 +2653,47 @@
     try { cd = screenCountdownSec(); } catch (_e) {}
     if (cd != null && cd > 0) return cd;
     const last = lastOkJournal();
-    if (last && !last.result) {
+    if (last && !last.result && (last.t || 0) >= bootAt) {
       const dur = saneDurMs(last.durMs);
       return Math.max(1, Math.ceil((dur - (Date.now() - (last.t || 0))) / 1000));
     }
     return Math.max(0, Math.ceil(cooldownLeftMs() / 1000));
+  }
+  function clearStaleBusyIfIdle() {
+    if (staleBusyCleared) return;
+    if (realTradeOpenNow()) {
+      staleBusyCleared = true;
+      log("Boot: open trade on platform, keeping one-trade lock");
+      return;
+    }
+    let ready = false;
+    try { ready = !!readTimeWidgetValue(); } catch (_eU) {}
+    if (!ready && Date.now() - bootAt < 8000) return;
+    staleBusyCleared = true;
+    clickLock = false;
+    lastClickAt = 0;
+    try {
+      if (state.lastReason && /trade open|cooldown|wait \d+\s*s/i.test(String(state.lastReason))) {
+        state.lastReason = "";
+      }
+    } catch (_eR) {}
+    log("Boot: no open trade on platform, stale cooldown cleared");
+  }
+  async function maybeEnsureDurationIdle() {
+    if (durationEnsuredOnce) return;
+    if (realTradeOpenNow()) return;
+    let clock = false;
+    try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
+    if (!clock) {
+      try {
+        const v = readTimeWidgetValue();
+        const lab = String(v || "").toLowerCase().replace(/\s+/g, "");
+        if (v && TF_MS[lab]) durationEnsuredOnce = true;
+      } catch (_e1) {}
+      return;
+    }
+    try { await ensureDurationMode(); } catch (_e2) {}
+    durationEnsuredOnce = true;
   }
 
   function snapDoc() {
@@ -2635,6 +2754,10 @@
 
   async function scanWatchlist() {
     if (scanning || !state.auto) return;
+    if (!staleBusyCleared) {
+      try { clearStaleBusyIfIdle(); } catch (_eCl) {}
+      if (!staleBusyCleared) return;
+    }
     scanning = true;
     try {
       const snap0 = snapDoc();
@@ -2762,7 +2885,7 @@
       background:#10141c;color:#e8eef7;border:2px solid #3d9cf0;border-radius:12px;
       font:13px/1.4 system-ui,Segoe UI,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);
       user-select:none;display:flex !important;flex-direction:column;visibility:visible !important;opacity:1 !important;
-      pointer-events:auto !important;overflow:hidden;min-width:240px;min-height:160px;max-width:96vw;max-height:96vh}
+      pointer-events:auto !important;overflow:hidden;min-width:240px;min-height:320px;max-width:96vw;max-height:96vh}
     #quotexbot-hud.mini{width:auto;height:auto;min-height:0;padding:6px 10px}
     #quotexbot-hud .hd{display:flex;justify-content:space-between;align-items:center;
       padding:10px 12px;border-bottom:1px solid #2a3344;cursor:move}
@@ -2782,7 +2905,7 @@
     #quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
     #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px;flex:0 0 auto}
     #quotexbot-hud .logh{margin:10px 0 4px;font-size:11px;color:#9aa6b8;display:flex;justify-content:space-between;flex:0 0 auto}
-    #quotexbot-hud .log{flex:1;min-height:80px;height:auto;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
+    #quotexbot-hud .log{flex:1 1 auto;min-height:80px !important;height:auto;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
       border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
     #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
     #quotexbot-hud .log .empty{color:#6b7787}
@@ -2834,7 +2957,33 @@
     }
     if (top != null) el.style.top = top + "px";
     if (w.w) el.style.width = w.w + "px";
-    if (w.h && !(which === "hud" && state.minimized)) el.style.height = w.h + "px";
+    if (w.h && !(which === "hud" && state.minimized)) {
+      let h = Number(w.h) || 0;
+      if (which === "hud") h = Math.max(h, 360);
+      if (h > 0) el.style.height = h + "px";
+    }
+    if (which === "hud") ensureLogPane(el);
+  }
+  function ensureLogPane(el) {
+    if (!el || state.minimized) return;
+    try {
+      el.style.minHeight = Math.max(parseFloat(el.style.minHeight) || 0, 320) + "px";
+      const logEl = el.querySelector(".log");
+      if (logEl) {
+        logEl.style.minHeight = "80px";
+        logEl.style.flex = "1 1 auto";
+      }
+      const body = el.querySelector(".body");
+      if (body) body.style.minHeight = "80px";
+      if (logEl) {
+        const lh = logEl.getBoundingClientRect().height;
+        const hh = el.getBoundingClientRect().height;
+        if (lh < 80) {
+          el.style.height = Math.max(hh, 360) + "px";
+          logEl.style.minHeight = "80px";
+        }
+      }
+    } catch (_eL) {}
   }
   function saveWin(el, which) {
     if (!el) return;
@@ -2843,7 +2992,7 @@
       left: Math.round(Math.max(0, r.left)),
       top: Math.round(Math.max(0, r.top)),
       w: Math.round(Math.max(220, r.width)),
-      h: Math.round(Math.max(140, r.height)),
+      h: Math.round(Math.max(which === "hud" ? 360 : 140, r.height)),
     };
     if (which === "dash") state.dashWin = box;
     else state.hudWin = box;
@@ -2853,6 +3002,7 @@
     if (!el) return;
     if (which === "hud" && el.getAttribute("data-qpos") === "1") {
       /* persist HUD left/top across renders */
+      if (which === "hud") ensureLogPane(el);
     } else {
       applyWin(el, which);
       if (which === "hud") el.setAttribute("data-qpos", "1");
@@ -2881,7 +3031,7 @@
       el.style.bottom = "auto";
     } else {
       const w = Math.max(220, ev.clientX - winDrag.left);
-      const h = Math.max(140, ev.clientY - winDrag.top);
+      const h = Math.max(winDrag.which === "hud" ? 360 : 140, ev.clientY - winDrag.top);
       el.style.width = Math.min(w, window.innerWidth - winDrag.left) + "px";
       el.style.height = Math.min(h, window.innerHeight - winDrag.top) + "px";
     }
@@ -3048,8 +3198,8 @@
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="row"><span>Account</span><b>${(function(){ const s = tradeStats(); return s.total + " trades · Profit " + s.wins + " · Loss " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="btns">
-          <button class="up" type="button" data-act="up" ${(demo || state.liveAck) && !tradeBusy() ? "" : "disabled"}>Up</button>
-          <button class="down" type="button" data-act="down" ${(demo || state.liveAck) && !tradeBusy() ? "" : "disabled"}>Down</button>
+          <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>Up</button>
+          <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>Down</button>
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
         <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
@@ -3077,6 +3227,10 @@
         state.lastReason = "Trade open, skip";
         saveState(state); render();
         return;
+      }
+      if (cooldownLeftMs() > 0) {
+        log("Cooldown (auto only)");
+        state.lastReason = "Cooldown (auto only)";
       }
       (async function () {
         const r = await clickDir(act);
@@ -3297,6 +3451,8 @@
   setInterval(function () {
     ensureHud();
     settlePendingJournal();
+    try { clearStaleBusyIfIdle(); } catch (_eB) {}
+    try { maybeEnsureDurationIdle(); } catch (_eD) {}
     if (state.auto) scanWatchlist();
     else {
       const sig = String(state.lastPx) + "\0" + String(state.lastPair);
@@ -3316,7 +3472,11 @@
   log(scrape ? ("HUD on v" + CONFIG.version + " · CONFIG") : "HUD on, no scrape");
   render();
   renderDash();
-  if (state.auto) scanWatchlist();
+  setTimeout(function () {
+    try { clearStaleBusyIfIdle(); } catch (_eB) {}
+    try { maybeEnsureDurationIdle(); } catch (_eD) {}
+    if (state.auto) scanWatchlist();
+  }, 600);
   } catch (err) {
     try {
       const b = document.createElement("div");
