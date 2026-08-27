@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.43-ext)
+ * quotexbot Chrome MV3 content script (v0.9.44-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -550,7 +550,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.43-ext",
+    version: "0.9.44-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -635,6 +635,10 @@
   let cdGhost1At = 0;
   let cdGhostLogged = false;
   let lastWaitLogSig = "";
+  let sessionAuto = false;
+  let waitIgnoredLogged = false;
+  let botSyntheticClick = false;
+  let autoPtrArmed = false;
   let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
@@ -696,6 +700,7 @@
   state.lastGoodPx = null;
   lastGoodPxAt = 0;
   /* Never restore Auto ON from localStorage. User must press Start auto. */
+  sessionAuto = false;
   state.auto = false;
   /* Persist lastReason "wait 56s" must not survive reload. */
   try {
@@ -1557,35 +1562,48 @@
 
   function realishClick(el) {
     if (!el) return;
-    let x = 0, y = 0;
+    botSyntheticClick = true;
     try {
-      const r = el.getBoundingClientRect();
-      x = r.left + r.width / 2;
-      y = r.top + r.height / 2;
-    } catch (_eR) {}
-    const base = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-      screenX: x,
-      screenY: y,
-      button: 0,
-      buttons: 1,
-      which: 1,
-    };
-    try {
-      el.dispatchEvent(new PointerEvent("pointerdown", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base)));
-    } catch (_e0) {}
-    try { el.dispatchEvent(new MouseEvent("mousedown", base)); } catch (_e1) {}
-    const up = Object.assign({}, base, { buttons: 0 });
-    try {
-      el.dispatchEvent(new PointerEvent("pointerup", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, up)));
-    } catch (_e2) {}
-    try { el.dispatchEvent(new MouseEvent("mouseup", up)); } catch (_e3) {}
-    try { el.dispatchEvent(new MouseEvent("click", up)); } catch (_e4) {}
+      try {
+        if (typeof canClickPlatform === "function") {
+          if (!canClickPlatform(el)) return;
+        } else {
+          if (el.id === "quotexbot-hud" || (el.closest && el.closest("#quotexbot-hud"))) return;
+          if (el.getAttribute && el.getAttribute("data-act")) return;
+        }
+      } catch (_eSkip) { return; }
+      let x = 0, y = 0;
+      try {
+        const r = el.getBoundingClientRect();
+        x = r.left + r.width / 2;
+        y = r.top + r.height / 2;
+      } catch (_eR) {}
+      const base = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        button: 0,
+        buttons: 1,
+        which: 1,
+      };
+      try {
+        el.dispatchEvent(new PointerEvent("pointerdown", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base)));
+      } catch (_e0) {}
+      try { el.dispatchEvent(new MouseEvent("mousedown", base)); } catch (_e1) {}
+      const up = Object.assign({}, base, { buttons: 0 });
+      try {
+        el.dispatchEvent(new PointerEvent("pointerup", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, up)));
+      } catch (_e2) {}
+      try { el.dispatchEvent(new MouseEvent("mouseup", up)); } catch (_e3) {}
+      try { el.dispatchEvent(new MouseEvent("click", up)); } catch (_e4) {}
+    } finally {
+      botSyntheticClick = false;
+    }
   }
 
   function dismissAssetList() {
@@ -1829,6 +1847,17 @@
     const icon = findPairInfoIcon();
     if (!icon || !icon.el) return false;
     try { moveHudOffPair(null, icon.r); } catch (_eH) {}
+    try {
+      if (isBotChrome(icon.el)) return false;
+      if (isPairInfoHeadingEl(icon.el)) return false;
+      if (icon.el.closest && (icon.el.closest("#quotexbot-hud") || icon.el.closest("#quotexbot-dash") || icon.el.closest("div.XfvzC") || icon.el.closest(".XfvzC"))) return false;
+      if (icon.el.getAttribute && icon.el.getAttribute("data-act")) return false;
+      const hud = document.getElementById("quotexbot-hud");
+      if (hud && icon.r) {
+        const hr = hud.getBoundingClientRect();
+        if (rectsOverlap(hr, icon.r, 4)) return false;
+      }
+    } catch (_eSkip) { return false; }
     lastPairInfoClickAt = now;
     lastPairInfoClickPair = visiblePair() || lastSeenPair || "";
     try { realishClick(icon.el); } catch (_eC) {}
@@ -1934,21 +1963,28 @@
       const i = t.indexOf(".");
       return i < 0 ? 0 : t.length - i - 1;
     }
-    /* OCR often reads leading 5 as 6 on the tenths place (0.58028 → 0.68026). */
+    /* OCR often reads tenths 0↔1 / 5↔6 (1.032 ↔ 1.132). If both in range, prefer lastGoodPx else mid of range. */
     function correctOcr(v, range, lastGood) {
       if (v == null || !isFinite(v)) return v;
       function inRange(x) { return x >= range.lo && x <= range.hi; }
-      const tries = [v, v - 0.1, v + 0.1]; // 5↔6 on the tenths place
-      if (lastGood != null) {
-        let best = v, bestD = 1e9;
+      const tries = [v, v - 0.1, v + 0.1];
+      const tenthsAmbiguous = inRange(v) && (inRange(v + 0.1) || inRange(v - 0.1));
+      function nearest(target) {
+        let best = v, bestD = 1e9, any = false;
         for (let i = 0; i < tries.length; i++) {
           const t = tries[i];
           if (!inRange(t)) continue;
-          const d = Math.abs(t - lastGood);
+          any = true;
+          const d = Math.abs(t - target);
           if (d < bestD) { bestD = d; best = t; }
         }
-        return best;
+        return any ? best : v;
       }
+      if (tenthsAmbiguous) {
+        if (lastGood != null && isFinite(lastGood)) return nearest(lastGood);
+        return nearest((range.lo + range.hi) / 2);
+      }
+      if (lastGood != null && isFinite(lastGood)) return nearest(lastGood);
       if (inRange(v)) return v;
       for (let i = 1; i < tries.length; i++) if (inRange(tries[i])) return tries[i];
       return v;
@@ -1969,9 +2005,14 @@
       if (v < 2 && dec < 4) return false;
       /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
       if (state.lastGoodPx != null) {
-        const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
+        const abs = Math.abs(v - state.lastGoodPx);
+        const rel = abs / Math.max(Math.abs(state.lastGoodPx), 1e-6);
         /* 1%: 0.609 vs 0.581 is ~4.8%. First reading still allowed. Live ticks ~0.02%. */
-        if (rel > 0.01) return false;
+        if (rel > 0.01) {
+          const tenths = abs > 0.08 && abs < 0.12;
+          const bothIn = v >= range.lo && v <= range.hi && state.lastGoodPx >= range.lo && state.lastGoodPx <= range.hi;
+          if (!(tenths && bothIn)) return false;
+        }
       }
       return true;
     }
@@ -1989,16 +2030,42 @@
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
     /* (a) Price Now only if the popup is already open. Never click (i)/pair list. */
+    let popupOpen = false;
+    try { popupOpen = !!pairInfoPopupOpen(); } catch (_ePo) { popupOpen = false; }
     const pn = readPriceNow();
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
       bindLivePriceObserver(pn.el);
     }
-    if (pn && pn.v != null) pn.v = correctOcr(pn.v, range, state.lastGoodPx);
+    if (pn && pn.v != null) {
+      if (lastCanvasOcr && lastCanvasOcr.v != null) {
+        const dv = Math.abs(pn.v - lastCanvasOcr.v);
+        if (dv > 0.08 && dv < 0.12 && pn.v >= range.lo && pn.v <= range.hi) {
+          /* tenths 0↔1: keep Price Now, ignore OCR */
+        } else {
+          pn.v = correctOcr(pn.v, range, state.lastGoodPx);
+        }
+      } else {
+        pn.v = correctOcr(pn.v, range, state.lastGoodPx);
+      }
+    }
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
       lastPnAt = Date.now();
       return acceptLivePx(pn.v);
+    }
+    if (popupOpen) {
+      if (pn && pn.v != null && pn.v >= range.lo && pn.v <= range.hi) {
+        rememberQuotes([pn.v]);
+        lastPnAt = Date.now();
+        return acceptLivePx(pn.v);
+      }
+      if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
+        return state.lastGoodPx;
+      }
+      const heldPn = holdLivePx();
+      if (heldPn != null) return heldPn;
+      return null;
     }
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       return state.lastGoodPx;
@@ -2371,7 +2438,18 @@
   }
 
 
-  let botSyntheticClick = false;
+  function blurHudButtons() {
+    try {
+      const hud = document.getElementById("quotexbot-hud");
+      if (!hud) return;
+      const ae = document.activeElement;
+      if (ae && hud.contains(ae) && typeof ae.blur === "function") ae.blur();
+      const btns = hud.querySelectorAll("button");
+      for (let i = 0; i < btns.length; i++) {
+        try { if (btns[i] && typeof btns[i].blur === "function") btns[i].blur(); } catch (_e) {}
+      }
+    } catch (_e0) {}
+  }
   function isBotChrome(el) {
     if (!el) return true;
     try {
@@ -2804,6 +2882,7 @@
       return true;
     }
     try { setInvestmentField(mm.stake); } catch (_e4) {}
+    try { blurHudButtons(); } catch (_eBl) {}
     try { vis = visibleInvestmentDollars(); } catch (_e5) { vis = null; }
     if (vis != null && Math.abs(vis - mm.stake) < 0.51) {
       lastMmAppliedStake = mm.stake;
@@ -2928,7 +3007,6 @@
           cdSec = mm * 60 + ss;
         }
       }
-      const open = hasCd || /\b(open|pending)\b/i.test(t);
       let stake = 0, payout = 0, chip = null;
       const re = /([+\-\u2212])\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*\$?|\$\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*\$/g;
       let m;
@@ -2954,7 +3032,11 @@
       let green = false;
       try { green = colorLooksGreen(el); } catch (_g) {}
       if (green && payout > 0 && (!chip || !chip.win)) chip = { win: true, pnl: payout };
-      const settled = !open && chip != null;
+      /* OPEN only if it looks like a real platform trade: pair + CALL|PUT|Up|Down + $ amount + ticking MM:SS.
+         Bare pair+timer (chart tab / Pair Information / candle clock) is NOT a trade. */
+      const hasDollarAmt = /\$/.test(t) && (stake > 0 || /\$\s*\d|\d(?:\.\d+)?\s*\$/.test(t));
+      const realOpen = !!(dir && hasDollarAmt && hasCd && cdSec != null && cdSec > 0);
+      const settled = !realOpen && chip != null;
       found.push({
         y: r.top,
         pair: pair,
@@ -2964,7 +3046,7 @@
         win: !!(chip && chip.win) && !hasCd,
         pnl: chip ? chip.pnl : null,
         cdSec: cdSec,
-        open: hasCd || (open && !(chip && chip.win)),
+        open: realOpen,
         settled: settled && !hasCd,
         t: t.slice(0, 120),
       });
@@ -3832,25 +3914,34 @@
 
   function liveOpenEvidence() {
     let rowCd = null, moneyCd = null, reserved = false;
+    /* Open ONLY if (a) a real trades-list row exists (pair+dir+$+MM:SS) or (b) balance reserved this session.
+       Never treat canvas OCR countdown or bare DOM 00:SS (chart candle) as trade-open. */
     try {
       const s = tradesListCountdownSec();
       if (s != null && isFinite(s) && s > 2) rowCd = s;
     } catch (_e0) {}
-    try {
-      let dom = null;
-      if (typeof domCountdownSec === "function") dom = domCountdownSec();
-      else if (typeof screenCountdownSec === "function") dom = screenCountdownSec();
-      if (dom != null && isFinite(dom) && dom > 2) moneyCd = dom;
-    } catch (_e1) {}
-    if (moneyCd == null) {
-      try {
-        if (typeof canvasCountdownSec === "function" && lastCanvasCd && lastCanvasCd.money) {
-          const cv = canvasCountdownSec();
-          if (cv != null && isFinite(cv) && cv > 2) moneyCd = cv;
-        }
-      } catch (_e2) {}
-    }
     try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
+    const real = (rowCd != null && rowCd > 2) || reserved;
+    if (!real && !waitIgnoredLogged) {
+      let ghost = false;
+      try {
+        const rows = listTradeRows();
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          if (r && !r.open && r.cdSec != null && Number(r.cdSec) > 2) { ghost = true; break; }
+        }
+      } catch (_eG0) {}
+      if (!ghost) {
+        try {
+          const cv = canvasCountdownSec();
+          if (cv != null && cv > 2) ghost = true;
+        } catch (_eG1) {}
+      }
+      if (ghost) {
+        waitIgnoredLogged = true;
+        log("Wait ignored, no open trade");
+      }
+    }
     return { rowCd: rowCd, moneyCd: moneyCd, reserved: reserved };
   }
   function platformIdleNoTrade() {
@@ -4084,6 +4175,13 @@
   }
 
   async function scanWatchlist() {
+    if (!sessionAuto) {
+      if (state.auto) {
+        state.auto = false;
+        log("Auto blocked, no Start auto");
+      }
+      return;
+    }
     if (scanning || !state.auto) return;
     if (!staleBusyCleared) {
       try { clearStaleBusyIfIdle(); } catch (_eCl) {}
@@ -4094,12 +4192,14 @@
       const snap0 = snapDoc();
       if (snap0.accountMode !== "demo") {
         state.auto = false;
+        sessionAuto = false;
         state.lastReason = "LIVE, auto off"; log("Live account, auto off");
         saveState(state); render();
         return;
       }
       if (state.autoCount >= MAX_AUTO) {
         state.auto = false;
+        sessionAuto = false;
         state.lastReason = "Auto paused"; log("10 trades done, auto stopped");
         saveState(state); render();
         return;
@@ -4554,6 +4654,7 @@
       root.innerHTML = `<div class="hd"><h1>quotexbot v${CONFIG.version}</h1>
         <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "Connected" : "Off"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
+      try { blurHudButtons(); } catch (_eBl0) {}
       return;
     }
     root.className = "";
@@ -4580,7 +4681,7 @@
         </div>
         <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
         <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
-        <p class="note">${(function(){ try { clearGhostWaitReason(); const ev = liveOpenEvidence(); if (ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (isGhostWaitReason(r)) r = ""; return r || "Pair switch off. Save price and trade on the open chart."; })()}</p>
+        <p class="note">${(function(){ try { clearGhostWaitReason(); const ev = liveOpenEvidence(); if ((ev.rowCd > 2 || ev.reserved) && tradeWaitSec() > 2) { const left = tradeWaitSec(); if (left > 2) return "Trade open, wait " + left + "s"; } } catch(_eW) {} let r = state.lastReason || ""; if (isGhostWaitReason(r)) r = ""; return r || "Pair switch off. Save price and trade on the open chart."; })()}</p>
         <div class="logh"><span>Log · what the bot is doing</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
@@ -4589,6 +4690,7 @@
     const box = root.querySelector(".log");
     if (box) box.scrollTop = box.scrollHeight;
     mountGrip(root, "hud");
+    try { blurHudButtons(); } catch (_eBl) {}
     renderDash();
   }
 
@@ -4641,16 +4743,25 @@
     }
     if (act === "auto") {
       if (!ev || ev.isTrusted !== true) return;
+      if (botSyntheticClick) return;
+      const autoBtn = ev.target && ev.target.closest && ev.target.closest('#quotexbot-hud button[data-act="auto"]');
+      if (!autoBtn) return;
+      const btnText = String(autoBtn.textContent || autoBtn.innerText || "").replace(/\s+/g, " ").trim();
       const snap = snapDoc();
-      if (state.auto) {
+      if (state.auto || /^stop auto$/i.test(btnText)) {
         state.auto = false;
+        sessionAuto = false;
         log("Auto off");
       } else if (snap.accountMode !== "demo") {
         state.lastReason = "Auto off on live account";
         log("Live, auto not started");
       } else {
+        if (!/^start auto$/i.test(btnText)) return;
+        if (!autoPtrArmed) return;
         /* state.auto = true ONLY here, from a real Start auto click. */
         state.auto = true;
+        sessionAuto = true;
+        autoPtrArmed = false;
         state.autoCount = 0;
         state.lastReason = "Auto on · pair browse";
         log("Auto on — staying on this chart");
@@ -4661,6 +4772,14 @@
   }
 
   function bindHud(el) {
+    el.addEventListener("pointerdown", function (ev) {
+      autoPtrArmed = false;
+      if (botSyntheticClick) return;
+      if (!ev || ev.isTrusted !== true) return;
+      const btn = ev.target && ev.target.closest && ev.target.closest('#quotexbot-hud button[data-act="auto"]');
+      if (!btn) return;
+      autoPtrArmed = true;
+    }, true);
     el.addEventListener("click", onHudClick);
     el.addEventListener("mousedown", function (ev) { startWin(el, "hud", ev); });
   }
@@ -4821,8 +4940,8 @@
       flushCaptureWaiters();
       return;
     }
-    /* Popup already open (div.XfvzC Pair Information) with Price Now: skip screenshot, never click heading/svg. */
-    if (pairInfoPopupOpen() && priceNowAlreadyOpen()) {
+    /* Popup already open (div.XfvzC Pair Information): use Price Now, skip screenshot OCR, never click heading. */
+    if (pairInfoPopupOpen()) {
       try { onQuoteTick(); } catch (_ePn) {}
       flushCaptureWaiters();
       return;
@@ -4833,7 +4952,7 @@
       return;
     }
     try { ensurePairInfoOpen(); } catch (_eI) {}
-    if (pairInfoPopupOpen() && priceNowAlreadyOpen()) {
+    if (pairInfoPopupOpen()) {
       try { onQuoteTick(); } catch (_ePn3) {}
       flushCaptureWaiters();
       return;
@@ -4940,6 +5059,10 @@
     ensureHud();
     settlePendingJournal();
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
+    if (state.auto && !sessionAuto) {
+      state.auto = false;
+      log("Auto blocked, no Start auto");
+    }
     try { maybeEnsureDurationIdle(); } catch (_eD) {}
     try { maybeApplyMmIdle(); } catch (_eMm) {}
     try { clearGhostWaitReason(); } catch (_eW1) {}
