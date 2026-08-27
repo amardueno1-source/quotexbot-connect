@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.36
+// @version      0.9.37
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -578,7 +578,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.36",
+    version: "0.9.37",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -614,7 +614,7 @@ if (window.__quotexbotAbortInstalled) {
       "USD/PHP": [40, 80],
       "USD/COP": [2000, 5000],
       "USD/BRL": [3, 9],
-      "USD/DZD": [80, 200],
+      "USD/DZD": [80, 400],
       "NZD/CAD": [0.75, 1.05],
       "NZD/USD": [0.50, 0.62],
       "USD/BDT": [90, 160],
@@ -740,7 +740,16 @@ if (window.__quotexbotAbortInstalled) {
 
   function priceRange(pairLabel) {
     const p = pairLabel || "";
-    const r = CONFIG.ranges[p];
+    let r = CONFIG.ranges[p];
+    if (!r) {
+      const k = fxPairKey(p);
+      if (k) {
+        const keys = Object.keys(CONFIG.ranges);
+        for (let i = 0; i < keys.length; i++) {
+          if (fxPairKey(keys[i]) === k) { r = CONFIG.ranges[keys[i]]; break; }
+        }
+      }
+    }
     if (r) return { lo: r[0], hi: r[1] };
     if (/JPY/i.test(p)) return { lo: 90, hi: 260 };
     if (/COP|BRL|ARS|CLP|INR|IDR|KRW|NGN|DZD|EGP|VND|PKR|TRY|MXN|ZAR|PHP|THB|MYR|BDT|LKR|NPR/i.test(p)) {
@@ -1409,8 +1418,56 @@ if (window.__quotexbotAbortInstalled) {
     return false;
   }
 
-  /* Open chart pair only: header / right trade panel.
-     Ignore Trades/history, leftover tooltips, old trade chips. */
+  function colorLooksGreenCss(c) {
+    const m = String(c || "").match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (!m) return false;
+    const r = +m[1], g = +m[2], b = +m[3];
+    return g >= 110 && g > r + 20 && g > b;
+  }
+  function tabLooksSelected(el) {
+    let cur = el;
+    for (let d = 0; d < 6 && cur && cur.nodeType === 1; d++) {
+      try {
+        if (cur.getAttribute) {
+          const ariaSel = cur.getAttribute("aria-selected");
+          const ariaCur = cur.getAttribute("aria-current");
+          if (ariaSel === "true" || ariaCur === "true" || ariaCur === "page") return true;
+          const ds = cur.getAttribute("data-selected") || cur.getAttribute("data-active") || "";
+          if (ds === "true" || ds === "1") return true;
+        }
+        const cls = String(cur.className || "");
+        if (/\b(active|selected|current|is-active|is-current|is-selected|tab-active|tab--active|isActive|isSelected)\b/i.test(cls)) return true;
+        try {
+          const cs = window.getComputedStyle(cur);
+          if (cs) {
+            const bw = parseFloat(cs.borderBottomWidth || "0") || 0;
+            if (bw >= 1.5 && colorLooksGreenCss(cs.borderBottomColor || "")) return true;
+            const bs = String(cs.boxShadow || "");
+            if (bs && bs !== "none" && colorLooksGreenCss(bs)) return true;
+            const td = String(cs.textDecorationLine || cs.textDecoration || "");
+            if (/underline/i.test(td) && colorLooksGreenCss(cs.textDecorationColor || cs.color || "")) return true;
+          }
+        } catch (_eCs) {}
+        try {
+          const kids = cur.children;
+          if (kids) {
+            for (let k = 0; k < kids.length && k < 8; k++) {
+              let kr = null, kcs = null;
+              try { kr = kids[k].getBoundingClientRect(); kcs = window.getComputedStyle(kids[k]); } catch (_eK2) { continue; }
+              if (!kr || !kcs) continue;
+              if (kr.height <= 6 && kr.width >= 16 && colorLooksGreenCss(kcs.backgroundColor || kcs.borderBottomColor || "")) return true;
+            }
+          }
+        } catch (_eK) {}
+      } catch (_e) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  /* Open chart pair only: RIGHT trade panel, or the SELECTED header tab.
+     Header band is the tab strip of ALL open charts — never pick a
+     non-selected sibling (leftmost AUD/NZD while USD/DZD is active). */
   function visiblePair() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -1443,13 +1500,9 @@ if (window.__quotexbotAbortInstalled) {
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
       const exact = titleRe.test(tClean);
       let extra = 0;
-      try {
-        const cls = String(el.className || "");
-        const aria = (el.getAttribute && el.getAttribute("aria-selected")) || "";
-        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 200;
-        const par = el.parentElement;
-        if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 80;
-      } catch (_e4) {}
+      let sel = false;
+      try { sel = tabLooksSelected(el); } catch (_eS) { sel = false; }
+      if (sel) extra += 400;
       if (exact) extra += 260;
       if (/OTC/i.test(tClean)) extra += 50;
       if (tClean.length < 18) extra += 40;
@@ -1458,8 +1511,8 @@ if (window.__quotexbotAbortInstalled) {
       const inRightPanel = r.left > wide * 0.55 && r.top > 8 && r.top < high * 0.72;
       const inChartBody = r.top >= 140 && r.left < wide * 0.52 && r.left > 8 && !inRightPanel;
       if (inChartBody) continue;
-      if (inHeaderBand) header.push({ lab: lab, score: score + 500, r: r, exact: exact });
-      else if (inRightPanel) right.push({ lab: lab, score: score + 180, r: r, exact: exact });
+      if (inHeaderBand) header.push({ lab: lab, score: score + 500, r: r, exact: exact, sel: sel });
+      else if (inRightPanel) right.push({ lab: lab, score: score + 180, r: r, exact: exact, sel: sel });
     }
     function pick(list) {
       let best = null, bestScore = -1e9;
@@ -1467,14 +1520,6 @@ if (window.__quotexbotAbortInstalled) {
         if (list[i].score > bestScore) { bestScore = list[i].score; best = list[i]; }
       }
       return best;
-    }
-    function hasLab(list, lab) {
-      const k = fxPairKey(lab);
-      if (!k) return false;
-      for (let i = 0; i < list.length; i++) {
-        if (fxPairKey(list[i].lab) === k) return true;
-      }
-      return false;
     }
     function titleRowOf(list) {
       if (!list.length) return [];
@@ -1489,14 +1534,21 @@ if (window.__quotexbotAbortInstalled) {
       return row;
     }
     const titleRow = titleRowOf(header);
-    const bestHeader = pick(titleRow) || pick(header);
+    const selHeader = [];
+    for (let i = 0; i < header.length; i++) if (header[i].sel) selHeader.push(header[i]);
+    const selTitle = [];
+    for (let i = 0; i < titleRow.length; i++) if (titleRow[i].sel) selTitle.push(titleRow[i]);
     const bestRight = pick(right);
-    if (bestHeader) return bestHeader.lab;
+    const bestSelHeader = pick(selTitle) || pick(selHeader);
+    /* Right trade-panel asset is the open chart. Do not use the tab strip. */
     if (bestRight) return bestRight.lab;
-    if (locked) return locked;
+    if (bestSelHeader) return bestSelHeader.lab;
+    /* Never pick a non-selected sibling tab (leftmost AUD/NZD, etc). */
+    if (locked && bestSelHeader && fxPairKey(locked) !== fxPairKey(bestSelHeader.lab)) return bestSelHeader.lab;
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
     if (fromSnap) return fromSnap;
+    if (locked) return locked;
     return null;
   }
 
@@ -1721,10 +1773,82 @@ if (window.__quotexbotAbortInstalled) {
   let lastTradesFp = "";
   let lastSeenPair = "";
   let lastObservedPx = null;
-  function parsePnlText(t) {
+  let lastPreClickBal = null;
+  let lastPreClickStake = null;
+  function parseMoneyNum(t) {
+    const n = parseFloat(String(t || "").replace(/,/g, "").replace(/[^\d.]/g, ""));
+    return isFinite(n) ? n : null;
+  }
+  function round2(n) {
+    return Math.round((Number(n) || 0) * 100) / 100;
+  }
+  function colorLooksGreen(el) {
+    try {
+      const cs = window.getComputedStyle(el);
+      return !!(cs && colorLooksGreenCss(cs.color || ""));
+    } catch (_e) { return false; }
+  }
+  function readPlatformBalance() {
+    try {
+      const snap = snapDoc();
+      if (snap && snap.balance) {
+        const n = parseMoneyNum(snap.balance);
+        if (n != null && n >= 1) return n;
+      }
+    } catch (_e0) {}
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let best = null;
+    try {
+      const nodes = document.querySelectorAll("span, div, b, strong, em");
+      const nMax = Math.min(nodes.length, SCAN_MAX);
+      for (let i = 0; i < nMax; i++) {
+        const el = nodes[i];
+        if (hud && (el === hud || hud.contains(el))) continue;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+        if (!r || r.top > 90 || r.height > 60 || r.width < 20) continue;
+        let t = "";
+        try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
+        if (!t || t.length > 28) continue;
+        const m = t.match(/(\d{2,7}(?:\.\d{1,2})?)\s*\$|\$\s*(\d{2,7}(?:\.\d{1,2})?)/);
+        if (!m) continue;
+        const n = parseFloat(m[1] || m[2]);
+        if (!isFinite(n) || n < 50) continue;
+        if (best == null || n > best) best = n;
+      }
+    } catch (_e3) {}
+    return best;
+  }
+  function readStakeAmount() {
+    try {
+      const snap = snapDoc();
+      if (snap && snap.stake) {
+        const n = parseMoneyNum(snap.stake);
+        if (n != null && n > 0 && n < 500) return n;
+      }
+    } catch (_e0) {}
+    try {
+      if (scrape && typeof scrape.findLabeledInput === "function") {
+        const el = scrape.findLabeledInput(document, /investment|amount|stake|инвест|сумма/i);
+        if (el) {
+          const v = (el.value != null ? el.value : "") || (el.textContent || "");
+          const n = parseMoneyNum(v);
+          if (n != null && n > 0 && n < 500) return n;
+        }
+      }
+    } catch (_e1) {}
+    return null;
+  }
+  function capturePreClickMoney() {
+    try { lastPreClickBal = readPlatformBalance(); } catch (_e0) { lastPreClickBal = null; }
+    try { lastPreClickStake = readStakeAmount(); } catch (_e1) { lastPreClickStake = null; }
+  }
+  function parsePnlText(t, opts) {
     const s = String(t || "").replace(/\s+/g, "");
     if (!s) return null;
-    if (/^0+(?:\.0+)?\$?$/.test(s) || s === "0.00$" || s === "$0.00" || s === "+0.00$" || s === "+0$") return { win: false, pnl: 0 };
+    if (/^0+(?:\.0+)?\$?$/.test(s) || s === "0.00$" || s === "$0.00" || s === "+0.00$" || s === "+0$" || s === "0$") return { win: false, pnl: 0 };
     const m = s.match(/^([+\-\u2212])?\$?(\d+(?:\.\d+)?)\$?$/);
     if (!m) return null;
     const n = parseFloat(m[2]);
@@ -1732,6 +1856,7 @@ if (window.__quotexbotAbortInstalled) {
     if (n < 0.001) return { win: false, pnl: 0 };
     if (m[1] === "-" || m[1] === "\u2212") return { win: false, pnl: -n };
     if (m[1] === "+") return { win: true, pnl: n };
+    if (opts && opts.green) return { win: true, pnl: n };
     return null;
   }
   function listPnlSnippets() {
@@ -1751,9 +1876,10 @@ if (window.__quotexbotAbortInstalled) {
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
       if (!t || t.length > 24) continue;
       if (!/[+$\u0024]|0\.00/.test(t)) continue;
-      const got = parsePnlText(t);
+      const green = colorLooksGreen(el);
+      const got = parsePnlText(t, { green: green });
       if (!got) continue;
-      found.push({ y: r.top, win: got.win, pnl: got.pnl, t: t });
+      found.push({ y: r.top, win: got.win, pnl: got.pnl, t: t, green: green });
     }
     found.sort(function (a, b) { return a.y - b.y; });
     const uniq = [];
@@ -1765,6 +1891,204 @@ if (window.__quotexbotAbortInstalled) {
       uniq.push(found[i]);
     }
     return uniq;
+  }
+  function countPnlKinds(snips) {
+    let zero = 0, win = 0;
+    const list = snips || [];
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].win) win += 1;
+      else if (Math.abs(Number(list[i].pnl) || 0) < 0.001) zero += 1;
+    }
+    return { zero: zero, win: win };
+  }
+  function dirFromText(t) {
+    const s = String(t || "");
+    if (/\b(call|up|higher|buy)\b/i.test(s)) return "CALL";
+    if (/\b(put|down|lower|sell)\b/i.test(s)) return "PUT";
+    return "";
+  }
+  function listTradeRows() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const found = [];
+    const nodes = document.querySelectorAll("div, li, tr, article");
+    const nMax = Math.min(nodes.length, SCAN_MAX * 3);
+    for (let i = 0; i < nMax; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e) { continue; }
+      if (!r || r.width < 90 || r.height < 22 || r.height > 220) continue;
+      const rightish = r.left >= wide * 0.45;
+      let hist = false;
+      try { hist = inTradesHistory(el); } catch (_eH) { hist = false; }
+      if (!rightish && !hist) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
+      if (!t || t.length < 8 || t.length > 240) continue;
+      const pairs = t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g);
+      if (!pairs || pairs.length !== 1) continue;
+      const pm = pairs[0].match(/([A-Za-z]{3})\s*\/\s*([A-Za-z]{3})/);
+      const pair = pm[1].toUpperCase() + "/" + pm[2].toUpperCase();
+      const dir = dirFromText(t);
+      let hasCd = false;
+      const cd = t.match(/\b(\d{1,2}):(\d{2})\b/);
+      if (cd) {
+        const mm = parseInt(cd[1], 10), ss = parseInt(cd[2], 10);
+        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15 && (mm * 60 + ss) > 0) hasCd = true;
+      }
+      const open = hasCd || /\b(open|pending)\b/i.test(t);
+      let stake = 0, payout = 0, chip = null;
+      const re = /([+\-\u2212])\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*\$?|\$\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*\$/g;
+      let m;
+      while ((m = re.exec(t))) {
+        const sign = m[1] || "";
+        const n = parseFloat(m[2] || m[3] || m[4]);
+        if (!isFinite(n)) continue;
+        if (sign === "+" && n > 0) {
+          if (!chip || !chip.win) chip = { win: true, pnl: n };
+          if (n > payout) payout = n;
+        } else if ((sign === "-" || sign === "\u2212") && n > 0) {
+          if (!chip) chip = { win: false, pnl: -n };
+        } else if (n < 0.005) {
+          if (!chip) chip = { win: false, pnl: 0 };
+        } else if (n > 0 && n < 500 && !stake) {
+          stake = n;
+        }
+      }
+      if (/\b(win|won|profit)\b/i.test(t) && (!chip || !chip.win)) {
+        chip = { win: true, pnl: payout || (chip && chip.pnl) || 0 };
+      }
+      if (/\b(loss|lost|lose)\b/i.test(t) && !chip) chip = { win: false, pnl: 0 };
+      let green = false;
+      try { green = colorLooksGreen(el); } catch (_g) {}
+      if (green && payout > 0 && (!chip || !chip.win)) chip = { win: true, pnl: payout };
+      const settled = !open && chip != null;
+      found.push({
+        y: r.top,
+        pair: pair,
+        dir: dir,
+        stake: stake,
+        payout: payout,
+        win: !!(chip && chip.win),
+        pnl: chip ? chip.pnl : null,
+        open: open && !(chip && chip.win),
+        settled: settled,
+        t: t.slice(0, 120),
+      });
+    }
+    found.sort(function (a, b) { return a.y - b.y; });
+    const uniq = [];
+    const seen = {};
+    for (let i = 0; i < found.length; i++) {
+      const f = found[i];
+      const k = fxPairKey(f.pair) + ":" + f.dir + ":" + Math.round(f.y / 12) + ":" + (f.win ? "w" : f.open ? "o" : "l");
+      if (seen[k]) continue;
+      seen[k] = 1;
+      uniq.push(f);
+    }
+    return uniq;
+  }
+  function journalDirOf(row) {
+    return String((row && (row.pos || row.signal)) || "").toUpperCase().replace(/UP|HIGHER|BUY/g, "CALL").replace(/DOWN|LOWER|SELL/g, "PUT");
+  }
+  function rowMatchesJournal(tr, row) {
+    if (!tr || !row) return false;
+    const jp = fxPairKey(row.pair);
+    const tp = fxPairKey(tr.pair);
+    if (!jp || !tp || jp !== tp) return false;
+    const jd = journalDirOf(row);
+    if ((jd === "CALL" || jd === "PUT") && tr.dir && tr.dir !== jd) return false;
+    const js = Number(row.stake) || 0;
+    if (js > 0 && tr.stake > 0 && Math.abs(js - tr.stake) > 0.051) return false;
+    return true;
+  }
+  function pickMatchingTrade(row, trades) {
+    const hits = [];
+    for (let i = 0; i < trades.length; i++) {
+      if (rowMatchesJournal(trades[i], row)) hits.push(trades[i]);
+    }
+    if (!hits.length) return null;
+    let older = 0;
+    const j = state.journal || [];
+    for (let i = 0; i < j.length; i++) {
+      if (j[i] === row) break;
+      const o = j[i];
+      if (!(o && o.ok && o.result)) continue;
+      if (fxPairKey(o.pair) !== fxPairKey(row.pair)) continue;
+      if (journalDirOf(o) && journalDirOf(row) && journalDirOf(o) !== journalDirOf(row)) continue;
+      const s0 = Number(o.stake) || 0, s1 = Number(row.stake) || 0;
+      if (s0 && s1 && Math.abs(s0 - s1) > 0.06) continue;
+      older += 1;
+    }
+    const unmatched = hits.slice(0, Math.max(0, hits.length - older));
+    const pool = unmatched.length ? unmatched : [];
+    const search = pool.length ? pool : [];
+    let bestWin = null, bestSettled = null, bestOpen = null;
+    for (let i = 0; i < search.length; i++) {
+      const h = search[i];
+      if (h.win && !bestWin) bestWin = h;
+      else if (h.open && !bestOpen) bestOpen = h;
+      else if (h.settled && !h.win && !bestSettled) bestSettled = h;
+    }
+    if (bestWin) return bestWin;
+    if (bestOpen) return bestOpen;
+    if (bestSettled) {
+      if (/0\.00/.test(String(row.fp || "")) && unmatched.length === 0) return bestOpen || null;
+      return bestSettled;
+    }
+    return null;
+  }
+  function profitFrom(row, src) {
+    const stake = Number(row && row.stake) || 0;
+    const pre = Number(row && row.bal);
+    let balNow = null;
+    try { balNow = readPlatformBalance(); } catch (_e) {}
+    if (isFinite(pre) && balNow != null && balNow - pre > 0.04) return round2(balNow - pre);
+    const payout = src && (src.payout != null ? Number(src.payout) : (src.win && Number(src.pnl) > 0 ? Number(src.pnl) : 0));
+    if (payout > 0 && stake > 0 && payout > stake + 0.02) return round2(payout - stake);
+    if (src && src.win && Number(src.pnl) > 0) {
+      const p = Number(src.pnl);
+      if (stake > 0 && p > stake + 0.02) return round2(p - stake);
+      return round2(p);
+    }
+    return 0;
+  }
+  function journalMoneyFields() {
+    const out = {
+      bal: lastPreClickBal,
+      stake: lastPreClickStake,
+      zeroN: 0,
+      winN: 0,
+    };
+    try {
+      const k = countPnlKinds(listPnlSnippets());
+      out.zeroN = k.zero;
+      out.winN = k.win;
+    } catch (_e) {}
+    if (out.bal == null) {
+      try { out.bal = readPlatformBalance(); } catch (_b) {}
+    }
+    if (out.stake == null) {
+      try { out.stake = readStakeAmount(); } catch (_s) {}
+    }
+    return out;
+  }
+  function applyJournalResult(row, result, pnl, force) {
+    if (!row) return false;
+    if (row.result === "win") return false;
+    if (row.result === "loss") {
+      if (result !== "win") return false;
+      if (!(row.forceLoss || Math.abs(Number(row.pnl) || 0) < 0.001)) return false;
+    }
+    row.result = result;
+    row.pnl = result === "win" ? round2(pnl) : round2(pnl != null ? pnl : 0);
+    row.settledAt = Date.now();
+    row.forceLoss = result === "loss" && !!force;
+    if (result === "win") row.forceLoss = false;
+    return true;
   }
   function tradeStats() {
     const j = state.journal || [];
@@ -2008,47 +2332,140 @@ if (window.__quotexbotAbortInstalled) {
     let fpNow = "";
     try { fpNow = tradesFingerprint(); } catch (_fp) {}
     const snips = countingDown ? [] : listPnlSnippets();
+    const trades = countingDown ? [] : listTradeRows();
+    let balNow = null;
+    try { balNow = readPlatformBalance(); } catch (_b) {}
+    const kinds = countPnlKinds(snips);
     let changed = false;
+    const lastOk = lastOkJournal();
+    function logSettle(row, win, pnl) {
+      try { notePair(row.pair, { lastResult: win ? "win" : "loss", lastPnl: pnl }); } catch (_np) {}
+      log((win ? "প্রফিট " : "লস ") + fmtMoney(pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
+    }
     for (let i = 0; i < state.journal.length; i++) {
       const row = state.journal[i];
-      if (!(row && row.ok && !row.result)) continue;
+      if (!(row && row.ok)) continue;
+      const isLast = row === lastOk;
+      const canFix = !row.result || (isLast && row.result === "loss" && (row.forceLoss || Math.abs(Number(row.pnl) || 0) < 0.001));
+      if (!canFix) continue;
+      if (row.result === "win") continue;
       const dur = saneDurMs(row.durMs);
       const age = now - (row.t || 0);
-      if (countingDown) continue;
-      if (age < dur) continue;
-      {
-        let got = null, zero = null, loss = null;
-        for (let k = 0; k < snips.length; k++) {
-          if (pnlAlreadyUsed(used, snips[k].pnl) && Math.abs(snips[k].pnl) > 0.001) continue;
-          if (snips[k].win === false && Math.abs(snips[k].pnl) < 0.001) { if (!zero) zero = snips[k]; continue; }
-          if (snips[k].win) { if (!got) got = snips[k]; }
-          else if (!loss) loss = snips[k];
-        }
-        if (zero) got = zero;
-        else if (!got) got = loss;
-        if (got) {
-          row.result = got.win ? "win" : "loss";
-          row.pnl = got.pnl;
-          row.settledAt = now;
-          used[String(got.pnl)] = 1;
+      if (countingDown && !row.result) continue;
+      if (age < dur && !row.result) continue;
+      const match = pickMatchingTrade(row, trades);
+      const stake = Number(row.stake) || 0;
+      const pre = Number(row.bal);
+      const hasPre = isFinite(pre) && pre > 0;
+
+      /* 1) Newest settled Trades row for THIS pair+direction+stake. Win chip wins. */
+      if (match && match.win && !match.open) {
+        const pnl = profitFrom(row, match);
+        if (applyJournalResult(row, "win", pnl, false)) {
           changed = true;
-          try { notePair(row.pair, { lastResult: row.result, lastPnl: row.pnl }); } catch (_np) {}
-          log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
+          logSettle(row, true, row.pnl);
           continue;
         }
       }
-      if (age >= dur + 12000) {
-        row.result = "loss";
-        row.pnl = 0;
-        row.settledAt = now;
-        changed = true;
-        try { notePair(row.pair, { lastResult: "loss", lastPnl: 0 }); } catch (_np2) {}
-        log("লস +0.00$ · " + (row.pair || ""));
+
+      /* 2) Platform balance rose vs pre-click after expiry → win (pnl = delta / payout-stake). */
+      if (hasPre && balNow != null && age >= dur) {
+        const delta = round2(balNow - pre);
+        if (delta > 0.04) {
+          if (applyJournalResult(row, "win", delta, false)) {
+            changed = true;
+            logSettle(row, true, row.pnl);
+            continue;
+          }
+        }
+      }
+
+      /* 3) This trade's payout / +N$ / green profit chip — never a leftover 0.00$. */
+      {
+        let winSnip = null;
+        for (let k = 0; k < snips.length; k++) {
+          if (!snips[k].win || Number(snips[k].pnl) <= 0.001) continue;
+          if (pnlAlreadyUsed(used, snips[k].pnl) && Math.abs(snips[k].pnl) > 0.001) continue;
+          const fp = String(row.fp || "");
+          const a = Number(snips[k].pnl).toFixed(2);
+          if (fp && (fp.indexOf("+" + a) !== -1 || fp.indexOf(a + "$") !== -1)) continue;
+          winSnip = snips[k];
+          break;
+        }
+        if (winSnip && !(match && match.open)) {
+          const pnl = profitFrom(row, winSnip);
+          if (applyJournalResult(row, "win", pnl, false)) {
+            changed = true;
+            used[String(row.pnl)] = 1;
+            logSettle(row, true, row.pnl);
+            continue;
+          }
+        }
+      }
+
+      if (row.result === "win") continue;
+      if (match && match.open) continue;
+
+      /* Still in-trade (balance down by stake) — payout not posted yet. */
+      if (hasPre && balNow != null && stake > 0) {
+        const down = round2(pre - balNow);
+        if (Math.abs(down - stake) < 0.08 || (down > 0.04 && balNow < pre - 0.04)) {
+          if (age < dur + 45000) continue;
+        }
+      }
+
+      /* 4) Loss only if THIS row shows 0.00$ / 0$, not a leftover chip. */
+      if (match && !match.open && !match.win && match.settled) {
+        const isZero = match.pnl == null || Math.abs(Number(match.pnl)) < 0.001;
+        const leftover = /0\.00/.test(String(row.fp || "")) && (Number(row.zeroN) || 0) >= kinds.zero;
+        if (!(isZero && leftover && kinds.win <= (Number(row.winN) || 0))) {
+          if (applyJournalResult(row, "loss", isZero ? 0 : match.pnl, false)) {
+            changed = true;
+            logSettle(row, false, row.pnl);
+            continue;
+          }
+        }
+      }
+
+      /* 5) Balance returned to pre-click → loss/tie. */
+      if (hasPre && balNow != null && age >= dur + 2000) {
+        const delta = round2(balNow - pre);
+        if (Math.abs(delta) < 0.05) {
+          if (applyJournalResult(row, "loss", 0, false)) {
+            changed = true;
+            logSettle(row, false, 0);
+            continue;
+          }
+        }
+      }
+
+      const leftoverZero = kinds.zero > 0 && kinds.zero <= (Number(row.zeroN) || 0);
+      const newZero = kinds.zero > (Number(row.zeroN) || 0);
+      if (leftoverZero && kinds.win <= (Number(row.winN) || 0)) {
+        /* leftover 0.00$ from a previous trade — wait */
+      } else if (newZero && kinds.win <= (Number(row.winN) || 0) && age >= dur + 4000) {
+        if (applyJournalResult(row, "loss", 0, false)) {
+          changed = true;
+          logSettle(row, false, 0);
+          continue;
+        }
+      }
+
+      /* 6) Force-loss only after a long wait with no win evidence. Never overwrite a win. */
+      if (!row.result && age >= dur + 28000) {
+        if (kinds.win > (Number(row.winN) || 0)) continue;
+        if (match && match.open) continue;
+        if (hasPre && balNow != null && balNow > pre + 0.04) continue;
+        if (applyJournalResult(row, "loss", 0, true)) {
+          changed = true;
+          logSettle(row, false, 0);
+        }
       }
     }
     if (!pendingJournal()) clickLock = false;
     if (changed) saveState(state);
   }
+
   function tradesFingerprint() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -2336,7 +2753,7 @@ if (window.__quotexbotAbortInstalled) {
   function journalManual(dir, r) {
     if (!r || !r.ok) return;
     const pos = dir === "down" ? "PUT" : "CALL";
-    const pair = lastSeenPair || visiblePair() || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "") || "—";
+    const pair = visiblePair() || lastSeenPair || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "") || "—";
     let durLabel = "1m";
     let durMsVal = CONFIG.tradeMs || 60000;
     try { durLabel = readExpiryLabel(); } catch (_d1) {}
@@ -2346,7 +2763,7 @@ if (window.__quotexbotAbortInstalled) {
     let fpAtClick = "";
     try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
     const px = state.lastPx != null && state.lastPx !== "" ? String(state.lastPx) : "—";
-    addJournal({
+    addJournal(Object.assign({
       t: Date.now(),
       pair: pair,
       signal: pos,
@@ -2357,7 +2774,7 @@ if (window.__quotexbotAbortInstalled) {
       fp: fpAtClick,
       ok: true,
       err: "",
-    });
+    }, journalMoneyFields()));
     lastClickAt = Date.now();
     lastTradesFp = fpAtClick;
     notePair(pair, {
@@ -2374,6 +2791,7 @@ if (window.__quotexbotAbortInstalled) {
     if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
     try { await ensureDurationMode(); } catch (_eDur) {}
     if (tradeBusy()) return { ok: false, error: "Trade open, skip" };
+    capturePreClickMoney();
     clickLock = true;
     try {
       const r = dir === "down" ? scrape.clickDown(document) : scrape.clickUp(document);
@@ -2487,7 +2905,7 @@ if (window.__quotexbotAbortInstalled) {
       durMsVal = tfToMs(durLabel);
       let fpAtClick = "";
       try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
-      addJournal({
+      addJournal(Object.assign({
         t: Date.now(),
         pair: p.label,
         signal: d.signal,
@@ -2498,7 +2916,7 @@ if (window.__quotexbotAbortInstalled) {
         fp: fpAtClick,
         ok: Boolean(r.ok),
         err: r.ok ? "" : (r.error || "fail"),
-      });
+      }, journalMoneyFields()));
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();

@@ -1,5 +1,5 @@
 /**
- * quotexbot MV3 service worker (v0.9.36-ext)
+ * quotexbot MV3 service worker (v0.9.37-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
  *   chrome.tabs.captureVisibleTab → send PNG + chart-canvas rect to the
