@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.1
+// @version      0.9.2
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.1";
+  const FILE_VER = "0.9.2";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.1",
+    version: "0.9.2",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -1334,22 +1334,23 @@ if (window.__quotexbotAbortInstalled) {
     #quotexbot-hud .pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#2a3344}
     #quotexbot-hud .pill.ok{background:#14532d;color:#86efac}
     #quotexbot-hud .body{padding:10px 12px;flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
-    #quotexbot-hud .row{display:flex;justify-content:space-between;margin:4px 0;color:#9aa6b8;gap:8px}
+    #quotexbot-hud .row{display:flex;justify-content:space-between;margin:4px 0;color:#9aa6b8;gap:8px;flex:0 0 auto}
     #quotexbot-hud .row b{color:#e8eef7;font-weight:600;text-align:right}
-    #quotexbot-hud .btns{display:flex;gap:8px;margin-top:8px}
-    #quotexbot-hud button{flex:1;border:0;border-radius:8px;padding:8px;color:#fff;cursor:pointer;font-weight:700}
+    #quotexbot-hud .btns{display:flex;gap:8px;margin-top:8px;flex:0 0 auto}
+    #quotexbot-hud button{border:0;border-radius:8px;padding:8px;color:#fff;cursor:pointer;font-weight:700;flex:0 0 auto;height:auto}
+    #quotexbot-hud .btns button{flex:1}
     #quotexbot-hud .up{background:#1fa971}
     #quotexbot-hud .down{background:#d64545}
-    #quotexbot-hud .auto{width:100%;margin-top:8px;background:#3d9cf0}
+    #quotexbot-hud .auto{width:100%;margin-top:8px;background:#3d9cf0;flex:0 0 auto}
     #quotexbot-hud .auto.on{background:#14532d}
     #quotexbot-hud .m{background:transparent;color:#9aa6b8;flex:0;padding:0 6px;font-size:14px}
-    #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px}
-    #quotexbot-hud .logh{margin:10px 0 4px;font-size:11px;color:#9aa6b8;display:flex;justify-content:space-between}
+    #quotexbot-hud .note{font-size:10px;color:#9aa6b8;margin-top:8px;flex:0 0 auto}
+    #quotexbot-hud .logh{margin:10px 0 4px;font-size:11px;color:#9aa6b8;display:flex;justify-content:space-between;flex:0 0 auto}
     #quotexbot-hud .log{flex:1;min-height:80px;height:auto;overflow:auto;background:#0b0f16;border:1px solid #2a3344;
       border-radius:8px;padding:8px;font:11px/1.45 ui-monospace,Consolas,monospace;color:#c5d0de;white-space:pre-wrap}
     #quotexbot-hud .log div{border-bottom:1px solid #1c2430;padding:3px 0}
     #quotexbot-hud .log .empty{color:#6b7787}
-    #quotexbot-hud .dashbtn{width:100%;margin-top:6px;background:#2a3344}
+    #quotexbot-hud .dashbtn{width:100%;margin-top:6px;background:#2a3344;flex:0 0 auto}
     #quotexbot-dash{position:fixed;top:12px;left:12px;z-index:2147483646 !important;width:540px;height:420px;
       overflow:hidden;background:#0b0f16;color:#e8eef7;
       border:2px solid #3d9cf0;border-radius:12px;font:13px/1.4 system-ui,sans-serif;
@@ -1360,7 +1361,6 @@ if (window.__quotexbotAbortInstalled) {
       padding:10px 12px;border-bottom:1px solid #2a3344;cursor:move;flex:0 0 auto}
     #quotexbot-hud .qgrip,#quotexbot-dash .qgrip{position:absolute;right:1px;bottom:1px;width:18px;height:18px;
       cursor:nwse-resize;z-index:5;background:linear-gradient(135deg,transparent 55%,#3d9cf0 55%);border-radius:0 0 10px 0}
-    #quotexbot-hud .body button,#quotexbot-dash .body{flex:1;min-height:0}
     #quotexbot-dash h1{margin:0;font-size:14px}
     #quotexbot-dash .body{padding:10px 12px;flex:1;overflow:auto;min-height:0}
     #quotexbot-dash h2{margin:12px 0 6px;font-size:12px;color:#9aa6b8;font-weight:600}
@@ -1463,13 +1463,13 @@ if (window.__quotexbotAbortInstalled) {
   window.addEventListener("mouseup", onWinUp);
 
   function injectCss() {
-    if (document.getElementById("quotexbot-hud-css")) return;
-    try { if (typeof GM_addStyle === "function") GM_addStyle(HUD_CSS); } catch (_e) {}
-    if (document.getElementById("quotexbot-hud-css")) return;
-    const st = document.createElement("style");
-    st.id = "quotexbot-hud-css";
+    let st = document.getElementById("quotexbot-hud-css");
+    if (!st) {
+      st = document.createElement("style");
+      st.id = "quotexbot-hud-css";
+      (document.head || document.documentElement).appendChild(st);
+    }
     st.textContent = HUD_CSS;
-    (document.head || document.documentElement).appendChild(st);
   }
 
   function createRoot() {
