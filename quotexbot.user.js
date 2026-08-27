@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.3
+// @version      0.9.4
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.3";
+  const FILE_VER = "0.9.4";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.3",
+    version: "0.9.4",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -1167,6 +1167,76 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   let lastTradesFp = "";
+  function parsePnlText(t) {
+    const s = String(t || "").replace(/\s+/g, "");
+    if (!s) return null;
+    if (/^0+(?:\.0+)?\$?$/.test(s) || s === "0.00$" || s === "$0.00") return { win: false, pnl: 0 };
+    const m = s.match(/^([+\-\u2212])?\$?(\d+(?:\.\d+)?)\$?$/);
+    if (!m) return null;
+    const n = parseFloat(m[2]);
+    if (!isFinite(n)) return null;
+    if (m[1] === "-" || m[1] === "\u2212") return { win: false, pnl: -n };
+    if (m[1] === "+" || n > 0.001) return { win: true, pnl: n };
+    return { win: false, pnl: 0 };
+  }
+  function listPnlSnippets() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const found = [];
+    const nodes = document.querySelectorAll("div, span, li, p, b");
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e) { continue; }
+      if (!r || r.left < wide * 0.58 || r.width < 8 || r.top < 70) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
+      if (!t || t.length > 24) continue;
+      const got = parsePnlText(t);
+      if (!got) continue;
+      found.push({ y: r.top, win: got.win, pnl: got.pnl, t: t });
+    }
+    found.sort(function (a, b) { return a.y - b.y; });
+    return found;
+  }
+  function tradeStats() {
+    const j = state.journal || [];
+    const taken = j.filter(function (x) { return x && x.ok; });
+    let wins = 0, losses = 0, pending = 0, net = 0, profit = 0;
+    for (let i = 0; i < taken.length; i++) {
+      const x = taken[i];
+      if (x.result === "win") { wins += 1; const n = Number(x.pnl) || 0; net += n; profit += n; }
+      else if (x.result === "loss") { losses += 1; net += Number(x.pnl) || 0; }
+      else pending += 1;
+    }
+    return { total: taken.length, wins: wins, losses: losses, pending: pending, net: net, profit: profit };
+  }
+  function fmtMoney(n) {
+    const x = Number(n) || 0;
+    return (x >= 0 ? "+" : "") + x.toFixed(2) + "$";
+  }
+  function settlePendingJournal() {
+    if (!Array.isArray(state.journal) || !state.journal.length) return;
+    const last = state.journal[state.journal.length - 1];
+    if (!last || !last.ok || last.result) return;
+    const age = Date.now() - (last.t || 0);
+    if (age < (CONFIG.minWaitMs || 8000)) return;
+    let fp = "";
+    try { fp = tradesFingerprint(); } catch (_e) {}
+    const closed = (lastTradesFp && fp && fp !== lastTradesFp) || age >= CONFIG.cooldownMs;
+    if (!closed) return;
+    const snips = listPnlSnippets();
+    if (!snips.length) return;
+    const got = snips[0];
+    last.result = got.win ? "win" : "loss";
+    last.pnl = got.pnl;
+    lastTradesFp = fp || lastTradesFp;
+    log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (last.pair || ""));
+    saveState(state);
+  }
   function tradesFingerprint() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -1197,7 +1267,10 @@ if (window.__quotexbotAbortInstalled) {
     if (age >= CONFIG.cooldownMs) return false;
     try {
       const fp = tradesFingerprint();
-      if (lastTradesFp && fp && fp !== lastTradesFp) return false;
+      if (lastTradesFp && fp && fp !== lastTradesFp) {
+        settlePendingJournal();
+        return false;
+      }
     } catch (_e) {}
     return true;
   }
@@ -1365,6 +1438,11 @@ if (window.__quotexbotAbortInstalled) {
     #quotexbot-dash h1{margin:0;font-size:14px}
     #quotexbot-dash .body{padding:10px 12px;flex:1;overflow:auto;min-height:0}
     #quotexbot-dash h2{margin:12px 0 6px;font-size:12px;color:#9aa6b8;font-weight:600}
+    #quotexbot-dash .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 10px;padding:10px;background:#10141c;border-radius:8px;border:1px solid #2a3344}
+    #quotexbot-dash .stats div{text-align:center;color:#9aa6b8;font-size:11px}
+    #quotexbot-dash .stats b{display:block;color:#e8eef7;font-size:18px;margin-top:4px;font-weight:700}
+    #quotexbot-dash .stats .win b{color:#86efac}
+    #quotexbot-dash .stats .lose b{color:#fca5a5}
     #quotexbot-dash table{width:100%;border-collapse:collapse;font-size:11px}
     #quotexbot-dash th,#quotexbot-dash td{padding:5px 6px;border-bottom:1px solid #1c2430;text-align:left}
     #quotexbot-dash th{color:#9aa6b8}
@@ -1523,15 +1601,23 @@ if (window.__quotexbotAbortInstalled) {
       const nbar = barCount(p.label);
       return "<tr><td>" + esc(p.label) + "</td><td>" + esc(st.px || "—") + "</td><td>" + nbar + "/21</td><td class=\"" + cls + "\">" + esc(sig) + "</td><td>" + esc(st.reason || "—") + "</td></tr>";
     }).join("");
+    settlePendingJournal();
+    const ts = tradeStats();
     const jrows = (state.journal || []).slice(-20).reverse().map(function (j) {
       const when = new Date(j.t);
       const hh = String(when.getHours()).padStart(2, "0");
       const mm = String(when.getMinutes()).padStart(2, "0");
       const ss = String(when.getSeconds()).padStart(2, "0");
       const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
-      return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td>" + (j.ok ? "OK" : esc(j.err || "FAIL")) + "</td></tr>";
+      let res = "—";
+      let rcls = "skip";
+      if (j.result === "win") { res = "প্রফিট " + fmtMoney(j.pnl); rcls = "call"; }
+      else if (j.result === "loss") { res = "লস " + fmtMoney(j.pnl); rcls = "put"; }
+      else if (j.ok) res = "চলছে";
+      else res = esc(j.err || "FAIL");
+      return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(j.signal) + "</td><td>" + esc(j.px) + "</td><td class=\"" + rcls + "\">" + res + "</td></tr>";
     }).join("") || "<tr><td colspan=\"5\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ক্লিক</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>মোট ট্রেড<b>" + ts.total + "</b></div><div class=\"win\">প্রফিট<b>" + ts.wins + "</b></div><div class=\"lose\">লস<b>" + ts.losses + "</b></div><div>নেট<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">ফলাফল অপেক্ষা: " + ts.pending + "</p>" : "") + "<h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>সিগন্যাল</th><th>দাম</th><th>ফলাফল</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
     mountGrip(dash, "dash");
   }
 
@@ -1560,6 +1646,7 @@ if (window.__quotexbotAbortInstalled) {
         <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} বার · সেভ</b></div>
         <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
+        <div class="row"><span>হিসাব</span><b>${(function(){ const s = tradeStats(); return s.total + " ট্রেড · প্রফিট " + s.wins + " · লস " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="btns">
           <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>উপরে</button>
           <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
@@ -1685,6 +1772,7 @@ if (window.__quotexbotAbortInstalled) {
 
   setInterval(function () {
     ensureHud();
+    settlePendingJournal();
     if (state.auto) scanWatchlist();
     else render();
   }, CONFIG.uiMs);
