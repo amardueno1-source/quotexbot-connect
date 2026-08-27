@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.18
+quotexbot Chrome MV3 extension  v0.9.19
 =======================================
 
 Load unpacked

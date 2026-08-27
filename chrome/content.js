@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.18-ext)
+ * quotexbot Chrome MV3 content script (v0.9.19-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.18-ext",
+    version: "0.9.19-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -579,6 +579,10 @@
     state.lastPx = "—";
     state.lastGoodPx = null;
     try { saveState(state); } catch (_e) {}
+  }
+  /* Saved HUD over pair-header zone (~top 280px) blocks the chart (i). Use CSS default. */
+  if (state.hudWin && state.hudWin.top != null && Number(state.hudWin.top) < 280) {
+    state.hudWin = null;
   }
   state.lastPx = "—";
   state.lastGoodPx = null;
@@ -1123,6 +1127,30 @@
     return best;
   }
 
+  function rectsOverlap(a, b, pad) {
+    if (!a || !b) return false;
+    pad = pad == null ? 0 : pad;
+    return !(a.right + pad <= b.left || a.left >= b.right + pad || a.bottom + pad <= b.top || a.top >= b.bottom + pad);
+  }
+
+  /* If HUD covers the pair (i), snap to bottom-right so the click can land. Save as hudWin. */
+  function moveHudOffPair(pairRect, infoRect) {
+    const hud = document.getElementById("quotexbot-hud");
+    if (!hud) return false;
+    let hr;
+    try { hr = hud.getBoundingClientRect(); } catch (_e) { return false; }
+    const hit =
+      (pairRect && rectsOverlap(hr, pairRect, 16)) ||
+      (infoRect && rectsOverlap(hr, infoRect, 16));
+    if (!hit) return false;
+    hud.style.right = "12px";
+    hud.style.bottom = "12px";
+    hud.style.left = "auto";
+    hud.style.top = "auto";
+    try { saveWin(hud, "hud"); } catch (_e2) {}
+    return true;
+  }
+
   function ensurePairInfoOpen() {
     const pair = lastSeenPair || visiblePair();
     const pn = readPriceNow();
@@ -1141,6 +1169,7 @@
     try { pairRect = pairEl.getBoundingClientRect(); } catch (_eR) { return; }
     const infoRe = /info/i;
     const reloadRe = /pair information/i;
+    const helpRe = /help|faq/i;
     const found = [];
     function consider(el) {
       if (!el || el === pairEl) return;
@@ -1150,6 +1179,7 @@
       let inner = "";
       try { inner = String(el.innerText || ""); } catch (_eT) {}
       if (reloadRe.test(inner)) return;
+      if (helpRe.test(inner)) return;
       const tag = String(el.tagName || "").toLowerCase();
       if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a" && tag !== "div") return;
       let r;
@@ -1157,6 +1187,7 @@
       if (!r || r.width < 4 || r.height < 4) return;
       if (r.width > 36 || r.height > 36) return;
       if (!isVisibleNode(el)) return;
+      if (r.left < 80) return; /* left-rail Help/FAQ (i) */
       const midPairY = pairRect.top + pairRect.height / 2;
       const midElY = r.top + r.height / 2;
       if (Math.abs(midElY - midPairY) > 44) return;
@@ -1169,6 +1200,7 @@
         role = String((el.getAttribute && el.getAttribute("role")) || "");
         cls = String(el.className && el.className.baseVal != null ? el.className.baseVal : el.className || "");
       } catch (_e2) {}
+      if (helpRe.test(title) || helpRe.test(aria) || helpRe.test(cls) || helpRe.test(String(el.id || ""))) return;
       let score = 0;
       if (infoRe.test(title) || infoRe.test(aria) || infoRe.test(cls) || infoRe.test(String(el.id || ""))) score += 60;
       if (tag === "button" || role === "button" || tag === "a") score += 12;
@@ -1176,7 +1208,7 @@
       if (Math.abs(r.width - r.height) < 8 && r.width <= 28) score += 16;
       if (r.right <= pairRect.left + 8 && r.left < pairRect.left + 2) score += 40;
       if (score <= 0) return;
-      found.push({ el: el, score: score });
+      found.push({ el: el, score: score, r: r });
     }
     let scope = pairEl;
     for (let d = 0; d < 5 && scope; d++) {
@@ -1190,8 +1222,12 @@
       } catch (_e3) {}
       scope = p;
     }
-    if (!found.length) return;
+    if (!found.length) {
+      try { moveHudOffPair(pairRect, null); } catch (_eM0) {}
+      return;
+    }
     found.sort(function (a, b) { return b.score - a.score; });
+    try { moveHudOffPair(pairRect, found[0].r); } catch (_eM) {}
     try { found[0].el.click(); } catch (_eC) {}
   }
 
@@ -2210,7 +2246,7 @@
       }
       host.appendChild(el);
       applyWin(el, "hud");
-      pinHud(el);
+      if (!state.hudWin) pinHud(el);
     }
     mount(0);
     return el;
