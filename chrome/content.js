@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.12-ext)
+ * quotexbot Chrome MV3 content script (v0.9.13-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.12-ext",
+    version: "0.9.13-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.68,
@@ -754,6 +754,108 @@
     return hits[0];
   }
 
+  function parsePriceNowNumber(raw) {
+    const str = String(raw || "");
+    if (!str) return null;
+    const re = /(\d{1,6}\.\d{2,6})/g;
+    let m;
+    while ((m = re.exec(str))) {
+      const i = m.index, e = i + m[1].length;
+      const before = str.slice(Math.max(0, i - 3), i);
+      const after = str.slice(e, e + 4);
+      if (/[%$€]/.test(after) || /[%$€+]/.test(before)) continue;
+      if (/[+\-]/.test(str.charAt(i - 1) || "")) continue;
+      if (/^\.\d/.test(after)) continue;
+      if (/^\s*min\b/i.test(after)) continue;
+      const v = parseFloat(m[1]);
+      if (isFinite(v) && v >= 0.4 && v < 1000000) return v;
+    }
+    return null;
+  }
+
+  function nodeText(el) {
+    try { return String(el.innerText || el.textContent || ""); } catch (_e) { return ""; }
+  }
+
+  function isVisibleNode(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      if (!r || r.width < 2 || r.height < 2) return false;
+      const wide = window.innerWidth || 1200, high = window.innerHeight || 800;
+      if (r.bottom < 0 || r.right < 0 || r.top > high || r.left > wide) return false;
+      return true;
+    } catch (_e) { return false; }
+  }
+
+  function nearbyHas(el, re, levels) {
+    let cur = el;
+    for (let d = 0; d <= levels && cur; d++) {
+      if (d > 0) {
+        const t = nodeText(cur);
+        if (t && t.length < 240 && re.test(t)) return true;
+      }
+      try {
+        const p = cur.parentElement;
+        let s = p && p.firstElementChild;
+        while (s) {
+          if (s !== cur) {
+            const t = nodeText(s);
+            if (t && t.length < 80 && re.test(t)) return true;
+          }
+          s = s.nextElementSibling;
+        }
+      } catch (_e) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  /* PAIR INFORMATION modal: "Price Now" 129.744 sits in the center, not on the right axis. */
+  function readPriceNow() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const strongRe = /price\s*now|current\s*price|цена/i;
+    const looseRe = /price/i;
+    const exactRe = /^(\d{1,6}\.\d{2,6})$/;
+    const nodes = [];
+    forEachRoot(function (root) {
+      try {
+        const list = root.querySelectorAll("span, div, b, strong, label, em, p, td, li, h1, h2, h3, h4");
+        for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
+      } catch (_e0) {}
+    });
+    const nScan = Math.min(nodes.length, SCAN_MAX);
+    for (let i = 0; i < nScan; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      if (!isVisibleNode(el)) continue;
+      const rawT = nodeText(el);
+      if (!rawT) continue;
+      if (/\b\d{1,2}\s*min\b/i.test(rawT) && !strongRe.test(rawT) && rawT.length < 24) continue;
+      const strongHere = strongRe.test(rawT);
+      const strongNear = !strongHere && nearbyHas(el, strongRe, 1);
+      if (strongHere || strongNear) {
+        let v = parsePriceNowNumber(rawT);
+        if (v == null && strongHere) {
+          try {
+            if (el.nextElementSibling) v = parsePriceNowNumber(nodeText(el.nextElementSibling));
+            if (v == null && el.previousElementSibling) v = parsePriceNowNumber(nodeText(el.previousElementSibling));
+            if (v == null && el.parentElement) v = parsePriceNowNumber(nodeText(el.parentElement));
+          } catch (_e1) {}
+        }
+        if (v != null) return { v: v, el: el };
+        continue;
+      }
+      const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+      if (stripped.length <= 16 && exactRe.test(stripped) && nearbyHas(el, looseRe, 2)) {
+        const v = parseFloat(stripped);
+        if (isFinite(v) && v >= 0.4 && v < 1000000) return { v: v, el: el };
+      }
+    }
+    return null;
+  }
+
   const quoteSeen = {};
   function rememberQuotes(vals) {
     const now = Date.now();
@@ -823,9 +925,15 @@
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
       return true;
     }
-    rememberQuotes([axis && axis.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
+    const axisOk = !!(axis && ok(axis.v));
+    const pn = axisOk ? null : readPriceNow();
+    rememberQuotes([axis && axis.v, pn && pn.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
+    if (!axisOk && pn && ok(pn.v)) {
+      state.lastGoodPx = pn.v;
+      return pn.v;
+    }
     const cands = [];
-    if (axis && ok(axis.v)) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
+    if (axisOk) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
     for (let i = 0; i < all.length; i++) {
       if (ok(all[i].v)) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
     }
