@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.9
+// @version      0.9.10
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -33,7 +33,6 @@
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
 // @downloadURL  https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js
-// @all_frames   true
 // @run-at       document-end
 // ==/UserScript==
 
@@ -46,6 +45,7 @@
  */
 
 (function quotexbotLoader() {
+  if (window.top !== window) return;
   function verNewer(remote, local) {
     const a = String(remote).split(".").map(Number);
     const b = String(local).split(".").map(Number);
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.9";
+  const FILE_VER = "0.9.10";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -92,6 +92,7 @@ if (window.__quotexbotAbortInstalled) {
 } else {
 (function (root) {
   "use strict";
+  if (window.top !== window) return;
 
   const UP_LABELS = new Set(
     [
@@ -530,6 +531,7 @@ if (window.__quotexbotAbortInstalled) {
 (function () {
   "use strict";
   try {
+  if (window.top !== window) return;
   if (window.__quotexbotHudBoot) return;
   window.__quotexbotHudBoot = true;
 
@@ -537,7 +539,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.9",
+    version: "0.9.10",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.68,
@@ -550,8 +552,8 @@ if (window.__quotexbotAbortInstalled) {
     minTicks: 2,
     sampleTicks: 16,
     sampleMs: 250,
-    recordMs: 400,
-    uiMs: 2500,
+    recordMs: 800,
+    uiMs: 4000,
     minBarsForEma: 21,
     emaFast: 8,
     emaSlow: 21,
@@ -593,6 +595,10 @@ if (window.__quotexbotAbortInstalled) {
   const VER = CONFIG.version;
   const MAX_AUTO = CONFIG.maxAuto;
   const WATCH = CONFIG.watch;
+  const SCAN_MAX = 800;
+  let axisObs = null;
+  let lastAxisEl = null;
+  let lastHudSig = "";
 
   function loadState() {
     try {
@@ -702,7 +708,9 @@ if (window.__quotexbotAbortInstalled) {
     }
     const re = /(\d{1,4}(?:\.\d{2,6}))/g;
     const nodes = document.querySelectorAll("span, div, b, strong, p, label, em, h1, h2, h3, td, li");
-    for (const el of nodes) {
+    const nMax = Math.min(nodes.length, SCAN_MAX);
+    for (let i = 0; i < nMax; i++) {
+      const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
       let raw = "";
       try { raw = (el.innerText || el.textContent || ""); } catch (_e3) { continue; }
@@ -713,14 +721,16 @@ if (window.__quotexbotAbortInstalled) {
       re.lastIndex = 0;
       let m;
       while ((m = re.exec(raw))) {
-        const s = m[1];
-        const decimals = (s.split(".")[1] || "").length;
-        add(parseFloat(s), el, decimals);
+        const s0 = m[1];
+        const decimals = (s0.split(".")[1] || "").length;
+        add(parseFloat(s0), el, decimals);
       }
     }
     try {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let walked = 0;
       while (walker.nextNode()) {
+        if (++walked > SCAN_MAX) break;
         const node = walker.currentNode;
         if (hud && hud.contains(node)) continue;
         const dashEl = document.getElementById("quotexbot-dash");
@@ -739,23 +749,12 @@ if (window.__quotexbotAbortInstalled) {
   function forEachRoot(cb) {
     const roots = [document];
     try {
-      const ifs = document.querySelectorAll("iframe");
-      for (let i = 0; i < ifs.length; i++) {
-        try {
-          const d = ifs[i].contentDocument;
-          if (d) roots.push(d);
-        } catch (_e) {}
+      if (lastAxisEl) {
+        const ar = lastAxisEl.getRootNode && lastAxisEl.getRootNode();
+        if (ar && ar !== document && typeof ar.querySelectorAll === "function") roots.push(ar);
       }
-    } catch (_e2) {}
-    for (let r = 0; r < roots.length; r++) {
-      cb(roots[r]);
-      try {
-        const all = roots[r].querySelectorAll("*");
-        for (let i = 0; i < all.length; i++) {
-          if (all[i].shadowRoot) cb(all[i].shadowRoot);
-        }
-      } catch (_e3) {}
-    }
+    } catch (_e) {}
+    for (let r = 0; r < roots.length; r++) cb(roots[r]);
   }
 
   function readAxisLivePrice() {
@@ -768,10 +767,11 @@ if (window.__quotexbotAbortInstalled) {
     forEachRoot(function (root) {
       try {
         const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
-        for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
       } catch (_e0) {}
     });
-    for (let i = 0; i < nodes.length; i++) {
+    const nScan = Math.min(nodes.length, SCAN_MAX);
+    for (let i = 0; i < nScan; i++) {
       const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
@@ -985,7 +985,8 @@ if (window.__quotexbotAbortInstalled) {
     const dashEl = document.getElementById("quotexbot-dash");
     const nodes = document.querySelectorAll("button, span, div, a, h1, h2, h3, b, strong, p");
     let best = null, bestScore = -1e9;
-    for (let n = 0; n < nodes.length; n++) {
+    const nMax = Math.min(nodes.length, SCAN_MAX);
+    for (let n = 0; n < nMax; n++) {
       const el = nodes[n];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
@@ -1239,8 +1240,6 @@ if (window.__quotexbotAbortInstalled) {
   let lastTradesFp = "";
   let lastSeenPair = "";
   let lastObservedPx = null;
-  let axisObs = null;
-  let lastAxisEl = null;
   function parsePnlText(t) {
     const s = String(t || "").replace(/\s+/g, "");
     if (!s) return null;
@@ -2039,26 +2038,24 @@ if (window.__quotexbotAbortInstalled) {
   function startQuoteObserver() {
     if (window.__quotexbotObs) return;
     window.__quotexbotObs = true;
-    try {
-      const obs = new MutationObserver(function () { onQuoteTick(); });
-      obs.observe(document.body || document.documentElement, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-      });
-    } catch (_e) {}
     setInterval(function () {
       bindAxisObserver();
       onQuoteTick();
     }, CONFIG.recordMs);
     bindAxisObserver();
+    onQuoteTick();
   }
 
   setInterval(function () {
     ensureHud();
     settlePendingJournal();
     if (state.auto) scanWatchlist();
-    else render();
+    else {
+      const sig = String(state.lastPx) + "\0" + String(state.lastPair);
+      if (sig === lastHudSig) return;
+      lastHudSig = sig;
+      render();
+    }
   }, CONFIG.uiMs);
 
   startQuoteObserver();
@@ -2089,9 +2086,12 @@ if (window.__quotexbotAbortInstalled) {
   }
 
   function checkRemoteVersion() {
+    if (window.top !== window) return;
+    if (window.__quotexbotReloading) return;
     const url = CONFIG.updateUrl;
     if (!url) return;
     function done(txt) {
+      if (window.__quotexbotReloading) return;
       const raw = String(txt || "");
       const m = raw.match(/@version\s+([0-9.]+)/);
       if (!m) return;
@@ -2108,6 +2108,7 @@ if (window.__quotexbotAbortInstalled) {
         return;
       }
       if (CONFIG.autoReloadOnUpdate) {
+        window.__quotexbotReloading = true;
         try { sessionStorage.setItem(key, "1"); } catch (_e2) {}
         log("আপডেট v" + remote + " লাগাতে একবার রিফ্রেশ");
         location.reload();
@@ -2133,8 +2134,10 @@ if (window.__quotexbotAbortInstalled) {
     } catch (_e4) {}
   }
 
-  setTimeout(checkRemoteVersion, 2500);
-  setInterval(checkRemoteVersion, CONFIG.checkUpdateMs);
+  if (window.top === window) {
+    setTimeout(checkRemoteVersion, 2500);
+    setInterval(checkRemoteVersion, CONFIG.checkUpdateMs);
+  }
 
   log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
   render();
