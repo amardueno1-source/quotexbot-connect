@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.7
+// @version      0.8.8
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.7";
+  const FILE_VER = "0.8.8";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.7",
+    version: "0.8.8",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -569,6 +569,11 @@ if (window.__quotexbotAbortInstalled) {
       "AUD/USD": [0.5, 0.85],
       "AUD/NZD": [0.9, 1.25],
       "USD/CAD": [1.2, 1.55],
+      "USD/PHP": [40, 80],
+      "USD/COP": [2000, 5000],
+      "USD/BRL": [3, 9],
+      "USD/DZD": [80, 200],
+      "NZD/CAD": [0.75, 1.05],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
