@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.13-ext)
+ * quotexbot Chrome MV3 content script (v0.9.14-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,10 +485,10 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.13-ext",
+    version: "0.9.14-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
-    axisRightFrac: 0.68,
+    axisRightFrac: 0.50,
     maxAuto: 10,
     cooldownMs: 65000,
     barBucketMs: 15000,
@@ -521,6 +521,7 @@
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
       "USD/BDT": [90, 160],
+      "USD/PKR": [200, 400],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -696,60 +697,129 @@
     for (let r = 0; r < roots.length; r++) cb(roots[r]);
   }
 
+  function collectAxisNodes(root, nodes) {
+    try {
+      const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
+      for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
+    } catch (_e0) {}
+  }
+
+  function largeSameOriginChartDocs() {
+    const docs = [];
+    try {
+      const list = document.querySelectorAll("iframe");
+      for (let i = 0; i < list.length && docs.length < 2; i++) {
+        const fr = list[i];
+        let w = 0, h = 0;
+        try {
+          const r = fr.getBoundingClientRect();
+          w = r.width || 0;
+          h = r.height || 0;
+        } catch (_e1) {}
+        if (w < 400 || h < 300) continue;
+        try {
+          const doc = fr.contentDocument;
+          if (doc && doc !== document) docs.push(doc);
+        } catch (_e2) {}
+      }
+    } catch (_e) {}
+    return docs;
+  }
+
   function readAxisLivePrice() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
-    const wide = window.innerWidth || 1200;
-    const leftMin = wide * (CONFIG.axisRightFrac || 0.55);
     const hits = [];
-    const nodes = [];
-    forEachRoot(function (root) {
+    function skipHudDash(el) {
       try {
-        const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
-        for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
-      } catch (_e0) {}
-    });
-    const nScan = Math.min(nodes.length, SCAN_MAX);
-    for (let i = 0; i < nScan; i++) {
-      const el = nodes[i];
-      if (hud && (el === hud || hud.contains(el))) continue;
-      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
-      let rawT = "";
-      try { rawT = (el.innerText || el.textContent || ""); } catch (_e) { continue; }
-      if (/[+\u2212$€]|\u0024/.test(rawT)) continue;
-      let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
-      if (!t || t.length > 28) continue;
-      if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
-      const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
-      if (!m) continue;
-      const v = parseFloat(m[1]);
-      if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
-      let r;
-      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
-      const leftMax = wide * 0.86;
-      if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
-      if (r.top < 70 || r.top > (window.innerHeight || 800) * 0.92) continue;
-      let font = 12;
-      let bg = "";
+        if (hud && (el === hud || hud.contains(el))) return true;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
+        const doc = el.ownerDocument;
+        if (doc && doc !== document) {
+          const h2 = doc.getElementById("quotexbot-hud");
+          if (h2 && (el === h2 || h2.contains(el))) return true;
+          const d2 = doc.getElementById("quotexbot-dash");
+          if (d2 && (el === d2 || d2.contains(el))) return true;
+        }
+      } catch (_e) {}
+      return false;
+    }
+    function scanDoc(root) {
+      const view = (root && root.defaultView) || (root && root.ownerDocument && root.ownerDocument.defaultView) || window;
+      const wide = (view && view.innerWidth) || window.innerWidth || 1200;
+      const high = (view && view.innerHeight) || window.innerHeight || 800;
+      const leftMin = wide * (CONFIG.axisRightFrac || 0.50);
+      const leftMax = wide * 0.995;
+      const nodes = [];
+      collectAxisNodes(root, nodes);
+      const canvases = [];
       try {
-        const cs = window.getComputedStyle(el);
-        font = parseFloat(cs.fontSize || "12");
-        bg = cs.backgroundColor || "";
-      } catch (_e3) {}
-      const hasBg = !!(bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)");
-      let nearBell = false;
-      try {
-        const p = el.parentElement;
-        nearBell = !!(p && (p.querySelector("svg") || p.querySelector("button") || el.previousElementSibling));
-      } catch (_e4) {}
-      hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
+        const cans = root.querySelectorAll("canvas");
+        for (let c = 0; c < cans.length && c < 8; c++) {
+          try { canvases.push(cans[c].getBoundingClientRect()); } catch (_ec) {}
+        }
+      } catch (_eC) {}
+      const nScan = Math.min(nodes.length, SCAN_MAX);
+      for (let i = 0; i < nScan; i++) {
+        const el = nodes[i];
+        if (skipHudDash(el)) continue;
+        let rawT = "";
+        try { rawT = (el.innerText || el.textContent || ""); } catch (_e) { continue; }
+        if (/[+\u2212$€]|\u0024/.test(rawT)) continue;
+        let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
+        if (!t || t.length > 28) continue;
+        if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
+        const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
+        if (!m) continue;
+        const v = parseFloat(m[1]);
+        if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+        if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
+        if (r.top < 70 || r.top > high * 0.92) continue;
+        let font = 12;
+        let bg = "";
+        try {
+          const cs = view.getComputedStyle(el);
+          font = parseFloat(cs.fontSize || "12");
+          bg = cs.backgroundColor || "";
+        } catch (_e3) {}
+        const hasBg = !!(bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)");
+        let nearBell = false;
+        let nearCanvas = false;
+        try {
+          const p = el.parentElement;
+          nearBell = !!(p && (p.querySelector("svg") || p.querySelector("button") || el.previousElementSibling));
+        } catch (_e4) {}
+        try {
+          for (let c = 0; c < canvases.length; c++) {
+            const cr = canvases[c];
+            if (cr.width < 80 || cr.height < 80) continue;
+            const midY = r.top + r.height / 2;
+            if (midY >= cr.top - 24 && midY <= cr.bottom + 24 && r.left >= cr.left + cr.width * 0.45 && r.left <= cr.right + 90) {
+              nearCanvas = true;
+              break;
+            }
+          }
+          if (!nearCanvas) {
+            const p = el.parentElement;
+            if (p && p.querySelector("canvas")) nearCanvas = true;
+          }
+        } catch (_e5) {}
+        hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, nearCanvas: nearCanvas, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
+      }
+    }
+    forEachRoot(function (root) { scanDoc(root); });
+    if (!hits.length) {
+      const extra = largeSameOriginChartDocs();
+      for (let f = 0; f < extra.length; f++) scanDoc(extra[f]);
     }
     if (!hits.length) return null;
     const midY = (window.innerHeight || 800) * 0.45;
     hits.sort(function (a, b) {
       const da = Math.abs(a.y - midY);
       const db = Math.abs(b.y - midY);
-      return (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (da - db) || (b.x - a.x) || (b.font - a.font);
+      return (b.nearCanvas - a.nearCanvas) || (b.nearBell - a.nearBell) || (da - db) || (b.x - a.x) || (b.font - a.font);
     });
     return hits[0];
   }
@@ -910,7 +980,7 @@
     const old = lastSeenPair || state.lastPair || "—";
     lastSeenPair = newLabel;
     state.lastPair = newLabel;
-    resetLivePrice("পেয়ার বদল: " + old + " → " + newLabel + ", দাম রিসেট");
+    resetLivePrice("Pair changed: " + old + " → " + newLabel + ", price reset");
   }
 
   function readLivePrice(pairLabel) {
@@ -1092,7 +1162,7 @@
   }
 
   function decideTicks(ticks) {
-    if (ticks.length < CONFIG.minTicks) return { signal: "SKIP", reason: "OTC tick কম" };
+    if (ticks.length < CONFIG.minTicks) return { signal: "SKIP", reason: "few OTC ticks" };
     const first = ticks[0], last = ticks[ticks.length - 1];
     if (last > first) return { signal: "CALL", reason: "OTC live up " + first + " → " + last };
     if (last < first) return { signal: "PUT", reason: "OTC live down " + first + " → " + last };
@@ -1127,7 +1197,7 @@
     const fast = ema(closes, CONFIG.emaFast);
     const slow = ema(closes, CONFIG.emaSlow);
     const r = rsi(closes, CONFIG.rsiPeriod);
-    if (fast == null || slow == null || r == null) return { signal: "SKIP", reason: "history কম" };
+    if (fast == null || slow == null || r == null) return { signal: "SKIP", reason: "short history" };
     const range = bar.high - bar.low;
     if (range <= 0) return { signal: "SKIP", reason: "flat candle" };
     const body = Math.abs(bar.close - bar.open);
@@ -1135,7 +1205,7 @@
     const upWick = (bar.high - Math.max(bar.open, bar.close)) / range;
     const dnWick = (Math.min(bar.open, bar.close) - bar.low) / range;
     const sep = Math.abs(fast - slow) / bar.close;
-    if (sep < CONFIG.emaSep) return { signal: "SKIP", reason: "EMA কাছাকাছি" };
+    if (sep < CONFIG.emaSep) return { signal: "SKIP", reason: "EMA too close" };
     const bull = bar.close > bar.open;
     const bear = bar.close < bar.open;
     if (fast > slow && bull) {
@@ -1494,7 +1564,7 @@
           row.pnl = got.pnl;
           used[String(got.pnl)] = 1;
           changed = true;
-          log((got.win ? "প্রফিট " : "লস ") + fmtMoney(got.pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
+          log((got.win ? "Profit " : "Loss ") + fmtMoney(got.pnl) + " · " + (row.pair || "") + (row.pos || row.signal ? " " + (row.pos || row.signal) : "") + (row.dur ? " · " + row.dur : ""));
           continue;
         }
       }
@@ -1502,7 +1572,7 @@
         row.result = "loss";
         row.pnl = 0;
         changed = true;
-        log("লস +0.00$ · " + (row.pair || ""));
+        log("Loss +0.00$ · " + (row.pair || ""));
       }
     }
     if (changed) saveState(state);
@@ -1565,20 +1635,20 @@
       const snap0 = snapDoc();
       if (snap0.accountMode !== "demo") {
         state.auto = false;
-        state.lastReason = "LIVE, auto off"; log("লাইভ অ্যাকাউন্ট দেখে অটো বন্ধ");
+        state.lastReason = "LIVE, auto off"; log("Live account, auto off");
         saveState(state); render();
         return;
       }
       if (state.autoCount >= MAX_AUTO) {
         state.auto = false;
-        state.lastReason = "অটো পজ"; log("১০টা ট্রেড হয়েছে, অটো থামল");
+        state.lastReason = "Auto paused"; log("10 trades done, auto stopped");
         saveState(state); render();
         return;
       }
       if (tradeOpen()) {
         const left = Math.max(0, CONFIG.cooldownMs - (Date.now() - lastClickAt));
-        state.lastReason = "ট্রেড চলছে, অপেক্ষা " + Math.ceil(left / 1000) + "s";
-        log("আগের ট্রেডের ফলাফল/কুলডাউন, অপেক্ষা " + Math.ceil(left / 1000) + "s");
+        state.lastReason = "Trade open, wait " + Math.ceil(left / 1000) + "s";
+        log("Waiting on last trade/cooldown " + Math.ceil(left / 1000) + "s");
         saveState(state); render();
         return;
       }
@@ -1587,51 +1657,51 @@
       const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;
       const p = (vis || fallback) ? { label: vis || fallback } : null;
       if (!p) {
-        log("চার্টে পেয়ার ধরা যায়নি, সুইচ করব না");
-        state.lastReason = "পেয়ার খোলা রাখো, সুইচ অফ";
+        log("Chart pair not detected, will not switch");
+        state.lastReason = "Keep this pair open, switch off";
         saveState(state); render();
         return;
       }
-      if (!vis && fallback) log("পেয়ার ট্যাব অস্থির, খোলা চার্ট ধরে: " + fallback);
+      if (!vis && fallback) log("Pair tab unstable, holding open chart: " + fallback);
 
       if (vis) onPairChange(p.label);
       state.lastPair = p.label;
       state.lastSignal = "…";
-      state.lastReason = "খোলা চার্ট: " + p.label;
-      log("এক চার্টে থাকছি: " + p.label);
+      state.lastReason = "Open chart: " + p.label;
+      log("Staying on this chart: " + p.label);
       saveState(state); render();
 
-      log("OTC চার্টের দাম পড়ছি: " + p.label);
+      log("Reading OTC chart price: " + p.label);
       const ticks = await sampleOtc(p.label);
       const bars = ingestTicks(p.label, ticks);
       const lastPx = ticks.length ? ticks[ticks.length - 1] : null;
       state.lastPx = lastPx != null ? String(lastPx) : "—";
       if (lastPx != null) {
-        log("OTC দাম " + p.label + " = " + lastPx + " · " + ticks.length + " tick");
+        log("OTC price " + p.label + " = " + lastPx + " · " + ticks.length + " tick");
       } else {
         const peek = peekQuotes(p.label);
-        log("OTC দাম পাইনি: " + p.label + " · পেজে " + peek.n + " নম্বর (" + (peek.shown || "খালি") + ")");
+        log("No OTC price: " + p.label + " · " + peek.n + " numbers on page (" + (peek.shown || "empty") + ")");
       }
 
       const hist = denseBars(p.label);
       let d;
       if (hist.length >= CONFIG.minBarsForEma) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
-        d = { signal: raw.signal, reason: "সেভ হিস্ট্রি " + hist.length + " বার · " + raw.reason };
+        d = { signal: raw.signal, reason: "saved history " + hist.length + " bars · " + raw.reason };
       } else if (ticks.length >= CONFIG.minTicks) {
         const live = decideTicks(ticks);
-        d = { signal: live.signal, reason: live.reason + " · জমা " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
+        d = { signal: live.signal, reason: live.reason + " · stored " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
       } else if (bars.length >= 2) {
         const a = bars[bars.length - 2], b = bars[bars.length - 1];
-        if (b.close > a.close) d = { signal: "CALL", reason: "সেভ বার up · জমা " + bars.length };
-        else if (b.close < a.close) d = { signal: "PUT", reason: "সেভ বার down · জমা " + bars.length };
-        else d = { signal: "SKIP", reason: "সেভ বার flat · জমা " + bars.length };
+        if (b.close > a.close) d = { signal: "CALL", reason: "saved bars up · stored " + bars.length };
+        else if (b.close < a.close) d = { signal: "PUT", reason: "saved bars down · stored " + bars.length };
+        else d = { signal: "SKIP", reason: "saved bars flat · stored " + bars.length };
       } else {
-        d = { signal: "SKIP", reason: "OTC দাম পাইনি · জমা " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
+        d = { signal: "SKIP", reason: "no OTC price · stored " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
       }
 
       state.lastSignal = d.signal;
-      state.lastReason = p.label + " · " + d.reason; log(p.label + " সিগন্যাল " + d.signal + " · " + d.reason);
+      state.lastReason = p.label + " · " + d.reason; log(p.label + " signal " + d.signal + " · " + d.reason);
       notePair(p.label, {
         px: lastPx != null ? String(lastPx) : (state.pairStats[p.label] && state.pairStats[p.label].px) || "—",
         signal: d.signal,
@@ -1669,9 +1739,9 @@
         lastClickAt = Date.now();
         lastTradesFp = fpAtClick;
         state.lastReason = d.signal + " " + p.label + " · " + durLabel + " · " + d.reason;
-        log("ক্লিক OK: " + d.signal + " " + p.label + " · " + durLabel + " · দাম " + (lastPx != null ? lastPx : "—"));
+        log("Click OK: " + d.signal + " " + p.label + " · " + durLabel + " · price " + (lastPx != null ? lastPx : "—"));
       } else {
-        state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
+        state.lastReason = p.label + " signal, click failed"; log("Click FAIL: " + p.label + " button not found");
       }
       saveState(state); render(); renderDash();
     } finally {
@@ -1787,7 +1857,7 @@
     if (!g) {
       g = document.createElement("div");
       g.className = "qgrip";
-      g.title = "সাইজ বদলাও";
+      g.title = "Resize";
       el.appendChild(g);
     }
   }
@@ -1931,15 +2001,15 @@
       const cls = j.signal === "CALL" ? "call" : j.signal === "PUT" ? "put" : "skip";
       let res = "—";
       let rcls = "skip";
-      if (j.result === "win") { res = "প্রফিট " + fmtMoney(j.pnl); rcls = "call"; }
-      else if (j.result === "loss") { res = "লস " + fmtMoney(j.pnl); rcls = "put"; }
-      else if (j.ok) res = "চলছে";
+      if (j.result === "win") { res = "Profit " + fmtMoney(j.pnl); rcls = "call"; }
+      else if (j.result === "loss") { res = "Loss " + fmtMoney(j.pnl); rcls = "put"; }
+      else if (j.ok) res = "open";
       else res = esc(j.err || "FAIL");
       const pos = j.pos || j.signal || "—";
       const dur = j.dur || "—";
       return "<tr><td>" + hh + ":" + mm + ":" + ss + "</td><td>" + esc(j.pair) + "</td><td class=\"" + cls + "\">" + esc(pos) + "</td><td>" + esc(dur) + "</td><td>" + esc(j.px) + "</td><td class=\"" + rcls + "\">" + res + "</td></tr>";
-    }).join("") || "<tr><td colspan=\"6\">এখনো ট্রেড নেই</td></tr>";
-    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot ড্যাশবোর্ড v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>মোট ট্রেড<b>" + ts.total + "</b></div><div class=\"win\">প্রফিট<b>" + ts.wins + "</b></div><div class=\"lose\">লস<b>" + ts.losses + "</b></div><div>নেট<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">ফলাফল অপেক্ষা: " + ts.pending + "</p>" : "") + "<h2>পেয়ার · সেভ ডেটা</h2><table><thead><tr><th>পেয়ার</th><th>OTC দাম</th><th>হিস্ট্রি</th><th>সিগন্যাল</th><th>কারণ</th></tr></thead><tbody>" + rows + "</tbody></table><h2>ট্রেড জার্নাল</h2><table><thead><tr><th>সময়</th><th>পেয়ার</th><th>পজিশন</th><th>সময়</th><th>দাম</th><th>ফলাফল</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
+    }).join("") || "<tr><td colspan=\"6\">No trades yet</td></tr>";
+    dash.innerHTML = "<div class=\"hd\"><h1>quotexbot Dashboard v" + CONFIG.version + "</h1><button class=\"m\" type=\"button\" data-act=\"dash-close\">×</button></div><div class=\"body\"><div class=\"stats\"><div>Total trades<b>" + ts.total + "</b></div><div class=\"win\">Profit<b>" + ts.wins + "</b></div><div class=\"lose\">Loss<b>" + ts.losses + "</b></div><div>Net<b>" + fmtMoney(ts.net) + "</b></div></div>" + (ts.pending ? "<p class=\"note\">Waiting on result: " + ts.pending + "</p>" : "") + "<h2>Pairs · saved data</h2><table><thead><tr><th>Pair</th><th>OTC price</th><th>History</th><th>Signal</th><th>Reason</th></tr></thead><tbody>" + rows + "</tbody></table><h2>Trade journal</h2><table><thead><tr><th>Time</th><th>Pair</th><th>Position</th><th>Time</th><th>Price</th><th>Result</th></tr></thead><tbody>" + jrows + "</tbody></table></div>";
     mountGrip(dash, "dash");
   }
 
@@ -1950,7 +2020,7 @@
     if (state.minimized) {
       root.className = "mini";
       root.innerHTML = `<div class="hd"><h1>quotexbot v${CONFIG.version}</h1>
-        <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "না"}</span>
+        <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "Connected" : "Off"}</span>
         <button class="m" type="button" data-act="restore">▣</button></div>`;
       return;
     }
@@ -1958,30 +2028,30 @@
     root.innerHTML = `
       <div class="hd">
         <h1>quotexbot v${CONFIG.version}</h1>
-        <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "সংযুক্ত" : "সংযুক্ত নয়"}</span>
+        <span class="pill ${state.connected ? "ok" : ""}">${state.connected ? "Connected" : "Not connected"}</span>
         <button class="m" type="button" data-act="mini">–</button>
       </div>
       <div class="body">
-        <div class="row"><span>মোড</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
-        <div class="row"><span>ব্রাউজ</span><b>সুইচ অফ · এক চার্ট</b></div>
-        <div class="row"><span>পেয়ার</span><b>${state.lastPair || snap.asset || "—"}</b></div>
-        <div class="row"><span>OTC দাম</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>হিস্ট্রি</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} বার · সেভ</b></div>
-        <div class="row"><span>সিগন্যাল</span><b>${state.lastSignal}</b></div>
-        <div class="row"><span>ট্রেড</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + (j.dur ? " · " + j.dur : "") + (j.result ? "" : " · চলছে"); })()}</b></div>
-        <div class="row"><span>অটো</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
-        <div class="row"><span>হিসাব</span><b>${(function(){ const s = tradeStats(); return s.total + " ট্রেড · প্রফিট " + s.wins + " · লস " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
+        <div class="row"><span>Mode</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
+        <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
+        <div class="row"><span>Pair</span><b>${state.lastPair || snap.asset || "—"}</b></div>
+        <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
+        <div class="row"><span>History</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} bars · saved</b></div>
+        <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
+        <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + (j.dur ? " · " + j.dur : "") + (j.result ? "" : " · open"); })()}</b></div>
+        <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
+        <div class="row"><span>Account</span><b>${(function(){ const s = tradeStats(); return s.total + " trades · Profit " + s.wins + " · Loss " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="btns">
-          <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>উপরে</button>
-          <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>নিচে</button>
+          <button class="up" type="button" data-act="up" ${demo || state.liveAck ? "" : "disabled"}>Up</button>
+          <button class="down" type="button" data-act="down" ${demo || state.liveAck ? "" : "disabled"}>Down</button>
         </div>
-        <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "অটো বন্ধ করো" : "অটো ট্রেড চালু"}</button>
-        <button class="dashbtn" type="button" data-act="dash">ড্যাশবোর্ড</button>
-        <p class="note">${state.lastReason || "পেয়ার সুইচ অফ। যে চার্ট খোলা সেখানেই দাম সেভ ও ট্রেড।"}</p>
-        <div class="logh"><span>লগ · bot এখন যা করছে</span><span>${state.logs.length}</span></div>
+        <button class="auto ${state.auto ? "on" : ""}" type="button" data-act="auto">${state.auto ? "Stop auto" : "Start auto"}</button>
+        <button class="dashbtn" type="button" data-act="dash">Dashboard</button>
+        <p class="note">${state.lastReason || "Pair switch off. Save price and trade on the open chart."}</p>
+        <div class="logh"><span>Log · what the bot is doing</span><span>${state.logs.length}</span></div>
         <div class="log">${state.logs.length
           ? state.logs.map((line) => "<div>" + line.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</div>").join("")
-          : '<div class="empty">এখনো কিছু হয়নি। অটো চালু করলে এখানে দেখাবে।</div>'}</div>
+          : '<div class="empty">Nothing yet. Start auto to see activity here.</div>'}</div>
       </div>`;
     const box = root.querySelector(".log");
     if (box) box.scrollTop = box.scrollHeight;
@@ -1997,27 +2067,27 @@
     if (act === "dash") { state.dashOpen = !state.dashOpen; saveState(state); renderDash(); }
     if (act === "up") {
       const r = clickDir("up");
-      state.lastReason = r.ok ? "উপরে clicked" : (r.error || "fail"); log(r.ok ? "ম্যানুয়াল উপরে OK" : "ম্যানুয়াল উপরে FAIL: " + (r.error || ""));
+      state.lastReason = r.ok ? "Up clicked" : (r.error || "fail"); log(r.ok ? "Manual Up OK" : "Manual Up FAIL: " + (r.error || ""));
       saveState(state); render();
     }
     if (act === "down") {
       const r = clickDir("down");
-      state.lastReason = r.ok ? "নিচে clicked" : (r.error || ""); log(r.ok ? "ম্যানুয়াল নিচে OK" : "ম্যানুয়াল নিচে FAIL: " + (r.error || ""));
+      state.lastReason = r.ok ? "Down clicked" : (r.error || ""); log(r.ok ? "Manual Down OK" : "Manual Down FAIL: " + (r.error || ""));
       saveState(state); render();
     }
     if (act === "auto") {
       const snap = snapDoc();
       if (state.auto) {
         state.auto = false;
-        log("অটো বন্ধ");
+        log("Auto off");
       } else if (snap.accountMode !== "demo") {
-        state.lastReason = "লাইভ অ্যাকাউন্টে অটো বন্ধ";
-        log("লাইভ, অটো চালু হয়নি");
+        state.lastReason = "Auto off on live account";
+        log("Live, auto not started");
       } else {
         state.auto = true;
         state.autoCount = 0;
-        state.lastReason = "অটো চালু · পেয়ার ব্রাউজ";
-        log("অটো চালু — এই চার্টেই থাকবে");
+        state.lastReason = "Auto on · pair browse";
+        log("Auto on — staying on this chart");
         scanWatchlist();
       }
       saveState(state); render();
@@ -2070,7 +2140,7 @@
     } else {
       root = createRoot();
       bindHud(root);
-      log("HUD আবার লাগানো হয়েছে");
+      log("HUD reattached");
       render();
     }
     dash = createDash();
@@ -2143,7 +2213,7 @@
   startQuoteObserver();
 
 
-  log(scrape ? ("HUD চালু v" + CONFIG.version + " · CONFIG") : "HUD চালু, scrape নেই");
+  log(scrape ? ("HUD on v" + CONFIG.version + " · CONFIG") : "HUD on, no scrape");
   render();
   renderDash();
   if (state.auto) scanWatchlist();

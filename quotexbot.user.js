@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.13
+// @version      0.9.14
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -70,7 +70,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.13";
+  const FILE_VER = "0.9.14";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -576,10 +576,10 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.13",
+    version: "0.9.14",
     minWaitMs: 8000,
     tradeMs: 60000,
-    axisRightFrac: 0.68,
+    axisRightFrac: 0.50,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
     autoReloadOnUpdate: true,
@@ -615,6 +615,7 @@ if (window.__quotexbotAbortInstalled) {
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
       "USD/BDT": [90, 160],
+      "USD/PKR": [200, 400],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -798,60 +799,129 @@ if (window.__quotexbotAbortInstalled) {
     for (let r = 0; r < roots.length; r++) cb(roots[r]);
   }
 
+  function collectAxisNodes(root, nodes) {
+    try {
+      const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
+      for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
+    } catch (_e0) {}
+  }
+
+  function largeSameOriginChartDocs() {
+    const docs = [];
+    try {
+      const list = document.querySelectorAll("iframe");
+      for (let i = 0; i < list.length && docs.length < 2; i++) {
+        const fr = list[i];
+        let w = 0, h = 0;
+        try {
+          const r = fr.getBoundingClientRect();
+          w = r.width || 0;
+          h = r.height || 0;
+        } catch (_e1) {}
+        if (w < 400 || h < 300) continue;
+        try {
+          const doc = fr.contentDocument;
+          if (doc && doc !== document) docs.push(doc);
+        } catch (_e2) {}
+      }
+    } catch (_e) {}
+    return docs;
+  }
+
   function readAxisLivePrice() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
-    const wide = window.innerWidth || 1200;
-    const leftMin = wide * (CONFIG.axisRightFrac || 0.55);
     const hits = [];
-    const nodes = [];
-    forEachRoot(function (root) {
+    function skipHudDash(el) {
       try {
-        const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
-        for (let i = 0; i < list.length && nodes.length < SCAN_MAX; i++) nodes.push(list[i]);
-      } catch (_e0) {}
-    });
-    const nScan = Math.min(nodes.length, SCAN_MAX);
-    for (let i = 0; i < nScan; i++) {
-      const el = nodes[i];
-      if (hud && (el === hud || hud.contains(el))) continue;
-      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
-      let rawT = "";
-      try { rawT = (el.innerText || el.textContent || ""); } catch (_e) { continue; }
-      if (/[+\u2212$€]|\u0024/.test(rawT)) continue;
-      let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
-      if (!t || t.length > 28) continue;
-      if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
-      const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
-      if (!m) continue;
-      const v = parseFloat(m[1]);
-      if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
-      let r;
-      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
-      const leftMax = wide * 0.86;
-      if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
-      if (r.top < 70 || r.top > (window.innerHeight || 800) * 0.92) continue;
-      let font = 12;
-      let bg = "";
+        if (hud && (el === hud || hud.contains(el))) return true;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
+        const doc = el.ownerDocument;
+        if (doc && doc !== document) {
+          const h2 = doc.getElementById("quotexbot-hud");
+          if (h2 && (el === h2 || h2.contains(el))) return true;
+          const d2 = doc.getElementById("quotexbot-dash");
+          if (d2 && (el === d2 || d2.contains(el))) return true;
+        }
+      } catch (_e) {}
+      return false;
+    }
+    function scanDoc(root) {
+      const view = (root && root.defaultView) || (root && root.ownerDocument && root.ownerDocument.defaultView) || window;
+      const wide = (view && view.innerWidth) || window.innerWidth || 1200;
+      const high = (view && view.innerHeight) || window.innerHeight || 800;
+      const leftMin = wide * (CONFIG.axisRightFrac || 0.50);
+      const leftMax = wide * 0.995;
+      const nodes = [];
+      collectAxisNodes(root, nodes);
+      const canvases = [];
       try {
-        const cs = window.getComputedStyle(el);
-        font = parseFloat(cs.fontSize || "12");
-        bg = cs.backgroundColor || "";
-      } catch (_e3) {}
-      const hasBg = !!(bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)");
-      let nearBell = false;
-      try {
-        const p = el.parentElement;
-        nearBell = !!(p && (p.querySelector("svg") || p.querySelector("button") || el.previousElementSibling));
-      } catch (_e4) {}
-      hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
+        const cans = root.querySelectorAll("canvas");
+        for (let c = 0; c < cans.length && c < 8; c++) {
+          try { canvases.push(cans[c].getBoundingClientRect()); } catch (_ec) {}
+        }
+      } catch (_eC) {}
+      const nScan = Math.min(nodes.length, SCAN_MAX);
+      for (let i = 0; i < nScan; i++) {
+        const el = nodes[i];
+        if (skipHudDash(el)) continue;
+        let rawT = "";
+        try { rawT = (el.innerText || el.textContent || ""); } catch (_e) { continue; }
+        if (/[+\u2212$€]|\u0024/.test(rawT)) continue;
+        let t = rawT.replace(/[\s\u00a0]/g, "").replace(/,/g, "");
+        if (!t || t.length > 28) continue;
+        if (/^[+\-]/.test(t) || /\$/.test(t)) continue;
+        const m = t.match(/^(\d{1,6}\.\d{2,6})$/);
+        if (!m) continue;
+        const v = parseFloat(m[1]);
+        if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
+        let r;
+        try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+        if (!r || r.left < leftMin || r.left > leftMax || r.width < 4 || r.height < 4) continue;
+        if (r.top < 70 || r.top > high * 0.92) continue;
+        let font = 12;
+        let bg = "";
+        try {
+          const cs = view.getComputedStyle(el);
+          font = parseFloat(cs.fontSize || "12");
+          bg = cs.backgroundColor || "";
+        } catch (_e3) {}
+        const hasBg = !!(bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)");
+        let nearBell = false;
+        let nearCanvas = false;
+        try {
+          const p = el.parentElement;
+          nearBell = !!(p && (p.querySelector("svg") || p.querySelector("button") || el.previousElementSibling));
+        } catch (_e4) {}
+        try {
+          for (let c = 0; c < canvases.length; c++) {
+            const cr = canvases[c];
+            if (cr.width < 80 || cr.height < 80) continue;
+            const midY = r.top + r.height / 2;
+            if (midY >= cr.top - 24 && midY <= cr.bottom + 24 && r.left >= cr.left + cr.width * 0.45 && r.left <= cr.right + 90) {
+              nearCanvas = true;
+              break;
+            }
+          }
+          if (!nearCanvas) {
+            const p = el.parentElement;
+            if (p && p.querySelector("canvas")) nearCanvas = true;
+          }
+        } catch (_e5) {}
+        hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, nearCanvas: nearCanvas, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
+      }
+    }
+    forEachRoot(function (root) { scanDoc(root); });
+    if (!hits.length) {
+      const extra = largeSameOriginChartDocs();
+      for (let f = 0; f < extra.length; f++) scanDoc(extra[f]);
     }
     if (!hits.length) return null;
     const midY = (window.innerHeight || 800) * 0.45;
     hits.sort(function (a, b) {
       const da = Math.abs(a.y - midY);
       const db = Math.abs(b.y - midY);
-      return (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (da - db) || (b.x - a.x) || (b.font - a.font);
+      return (b.nearCanvas - a.nearCanvas) || (b.nearBell - a.nearBell) || (da - db) || (b.x - a.x) || (b.font - a.font);
     });
     return hits[0];
   }
