@@ -1,8 +1,12 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.22-ext)
+ * quotexbot Chrome MV3 content script (v0.9.23-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
+ *
+ * Live price: hit-test the blue last-price tag on the FAR RIGHT of the chart
+ * (elementsFromPoint along the canvas right edge). Never click (i), pair name,
+ * or PAIR INFORMATION. Price Now is used only if that popup is already open.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -10,6 +14,7 @@
  *
  * Injects into LARGE frames (w>=600, h>=400) so the HUD sits ON the chart
  * iframe, not behind it. Tiny frames are skipped. No full-page MutationObserver.
+ * No querySelectorAll('*'), no location.reload.
  */
 
 (function (root) {
@@ -485,7 +490,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.22-ext",
+    version: "0.9.23-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -823,6 +828,152 @@
       }
     } catch (_e) {}
     return docs;
+  }
+
+
+  /* Blue last-price tag at the far right of the chart (moves with the last candle). */
+  function skipHudDashEl(el) {
+    if (!el) return true;
+    try {
+      const hud = document.getElementById("quotexbot-hud");
+      const dashEl = document.getElementById("quotexbot-dash");
+      if (hud && (el === hud || hud.contains(el))) return true;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
+      const doc = el.ownerDocument;
+      if (doc && doc !== document) {
+        const h2 = doc.getElementById("quotexbot-hud");
+        if (h2 && (el === h2 || h2.contains(el))) return true;
+        const d2 = doc.getElementById("quotexbot-dash");
+        if (d2 && (el === d2 || d2.contains(el))) return true;
+      }
+    } catch (_e) {}
+    return false;
+  }
+
+  function largestVisibleCanvas(root) {
+    let best = null, bestArea = 0;
+    function consider(el) {
+      if (!el) return;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e) { return; }
+      if (!r || r.width < 80 || r.height < 80) return;
+      const area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = { el: el, r: r }; }
+    }
+    try {
+      const cans = root.querySelectorAll("canvas");
+      for (let i = 0; i < cans.length && i < 16; i++) consider(cans[i]);
+    } catch (_e0) {}
+    if (!best) {
+      try {
+        const shadows = collectRightShadowRoots(root);
+        for (let s = 0; s < shadows.length; s++) {
+          try {
+            const cans = shadows[s].querySelectorAll("canvas");
+            for (let i = 0; i < cans.length && i < 8; i++) consider(cans[i]);
+          } catch (_e1) {}
+        }
+      } catch (_e2) {}
+    }
+    return best;
+  }
+
+  function nodeHasPaintedBg(el, view) {
+    if (!el) return false;
+    try {
+      const cs = (view || window).getComputedStyle(el);
+      const bg = (cs && cs.backgroundColor) || "";
+      if (bg && bg !== "transparent" && bg.indexOf("rgba(0, 0, 0, 0)") < 0 && bg !== "rgba(0,0,0,0)") return true;
+      const img = (cs && cs.backgroundImage) || "";
+      if (img && img !== "none") return true;
+    } catch (_e) {}
+    return false;
+  }
+
+  function readLiveTagByHit() {
+    const docs = [document];
+    try {
+      const extra = largeSameOriginChartDocs();
+      for (let i = 0; i < extra.length; i++) {
+        if (extra[i] && extra[i] !== document) docs.push(extra[i]);
+      }
+    } catch (_eD) {}
+    const hits = [];
+    const seen = [];
+    const pxRe = /\d{1,6}\.\d{1,6}/;
+    for (let d = 0; d < docs.length; d++) {
+      const root = docs[d];
+      const view = (root && root.defaultView) || window;
+      const canvas = largestVisibleCanvas(root);
+      if (!canvas || !canvas.r) continue;
+      const cr = canvas.r;
+      const midY = cr.top + cr.height / 2;
+      const y0 = cr.top + 40;
+      const y1 = cr.bottom - 40;
+      if (!(y1 > y0)) continue;
+      const x0 = cr.right - 12;
+      const x1 = cr.right + 48;
+      const nY = 25;
+      const nX = 4;
+      const vw = (view && view.innerWidth) || 1200;
+      const vh = (view && view.innerHeight) || 800;
+      const hitDoc = root;
+      for (let yi = 0; yi < nY; yi++) {
+        const y = y0 + (y1 - y0) * (yi / (nY - 1));
+        if (y < 0 || y > vh) continue;
+        for (let xi = 0; xi < nX; xi++) {
+          const x = x0 + (x1 - x0) * (xi / (nX - 1));
+          if (x < 0 || x > vw) continue;
+          let stack = [];
+          try {
+            if (typeof hitDoc.elementsFromPoint === "function") stack = hitDoc.elementsFromPoint(x, y) || [];
+            else if (view && view.document && typeof view.document.elementsFromPoint === "function") {
+              stack = view.document.elementsFromPoint(x, y) || [];
+            }
+          } catch (_eP) { stack = []; }
+          const nHit = Math.min(stack.length, 8);
+          for (let h = 0; h < nHit; h++) {
+            const el = stack[h];
+            if (!el || skipHudDashEl(el)) continue;
+            const tag = String(el.tagName || "").toUpperCase();
+            if (tag === "CANVAS" || tag === "IFRAME" || tag === "HTML" || tag === "BODY") continue;
+            if (seen.indexOf(el) >= 0) continue;
+            seen.push(el);
+            let rawT = "";
+            try { rawT = String(el.innerText || el.textContent || ""); } catch (_eT) { continue; }
+            if (!rawT) continue;
+            if (/[+\u2212$€%]|\u0024/.test(rawT) && !pxRe.test(rawT.replace(/[\s\u00a0\u202f]/g, ""))) continue;
+            const stripped = rawT.replace(/[\s\u00a0\u202f]/g, "").replace(/,/g, "");
+            if (!stripped || stripped.length > 16) continue;
+            const m = stripped.match(pxRe);
+            if (!m) continue;
+            const v = parseFloat(m[0]);
+            if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
+            let r;
+            try { r = el.getBoundingClientRect(); } catch (_eR) { continue; }
+            if (!r || r.width < 2 || r.height < 2) continue;
+            let hasBg = nodeHasPaintedBg(el, view);
+            if (!hasBg) {
+              try { hasBg = nodeHasPaintedBg(el.parentElement, view); } catch (_eB) {}
+            }
+            hits.push({
+              v: v,
+              el: el,
+              hasBg: hasBg,
+              short: stripped.length <= 16,
+              yDist: Math.abs((r.top + r.height / 2) - midY),
+              len: stripped.length
+            });
+          }
+        }
+      }
+    }
+    lastAxisScanN = hits.length;
+    if (!hits.length) return null;
+    hits.sort(function (a, b) {
+      return (b.hasBg - a.hasBg) || (b.short - a.short) || (a.yDist - b.yDist) || (a.len - b.len);
+    });
+    return hits[0];
   }
 
   /* Highlighted right-axis live tag is the last candle price (blue tag that tracks last close). Fallback when Price Now is missing. */
@@ -1287,189 +1438,10 @@
   }
 
   function ensurePairInfoOpen() {
-    const pair = lastSeenPair || visiblePair();
-    const pn = readPriceNow();
-    if (pn && pair) {
-      const range = priceRange(pair);
-      if (pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) return;
-    }
-    /* Asset list already open: never hunt (i). Try Escape / backdrop. */
-    if (isAssetListOpen()) {
-      const now0 = Date.now();
-      if (now0 - lastAssetListDismissAt >= 800) {
-        lastAssetListDismissAt = now0;
-        dismissAssetList();
-      }
-      return;
-    }
-    const now = Date.now();
-    /* After a pair switch, click (i) again immediately for the new pair. */
-    if (pair && pair !== lastPairInfoClickPair) lastPairInfoClickAt = 0;
-    if (now - lastPairInfoClickAt < 2500) return;
-    const pairEl = findChartPairLabelEl();
-    if (!pairEl) return;
-    lastPairInfoClickAt = now;
-    lastPairInfoClickPair = pair || lastPairInfoClickPair;
-    const hud = document.getElementById("quotexbot-hud");
-    const dashEl = document.getElementById("quotexbot-dash");
-    let pairRect;
-    try { pairRect = pairEl.getBoundingClientRect(); } catch (_eR) { return; }
-    const infoRe = /info/i;
-    const reloadRe = /pair information/i;
-    const helpRe = /help|faq/i;
-    const found = [];
-    function ownLooksLikePair(inner) {
-      const t = String(inner || "").replace(/\s+/g, " ").trim();
-      if (!t || t.length > 48) return false;
-      if (pair) {
-        const pairRe = new RegExp(String(pair).replace("/", "\\s*/\\s*") + "(?:\\s*\\(?OTC\\)?)?", "i");
-        if (pairRe.test(t)) return true;
-      }
-      return !!labelFromText(t);
-    }
-    function immediateLabelText(el) {
-      const parts = [];
-      try { parts.push(String((el.getAttribute && el.getAttribute("title")) || "")); } catch (_e0) {}
-      try { parts.push(String((el.getAttribute && el.getAttribute("aria-label")) || "")); } catch (_e1) {}
-      try { parts.push(String(el.innerText || "")); } catch (_e2) {}
-      try {
-        const p = el.parentElement;
-        if (p) {
-          const t = String(p.innerText || "").replace(/\s+/g, " ").trim();
-          let pr;
-          try { pr = p.getBoundingClientRect(); } catch (_eR) { pr = null; }
-          if (t.length < 64 && pr && pr.width <= 280 && pr.height <= 52) parts.push(t);
-        }
-      } catch (_e3) {}
-      return parts.join(" ");
-    }
-    function onPairInfoChip(el) {
-      function chipText(n) {
-        if (!n || n === pairEl) return false;
-        let t = "";
-        try { t = String(n.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { t = ""; }
-        if (!reloadRe.test(t) || t.length >= 64) return false;
-        try {
-          const cr = n.getBoundingClientRect();
-          if (cr.width <= 280 && cr.height <= 52 && cr.left >= pairRect.left - 8) return true;
-        } catch (_eC) { return true; }
-        return false;
-      }
-      let n = el;
-      for (let u = 0; u < 6 && n; u++) {
-        if (chipText(n)) return true;
-        try {
-          let s = n.parentElement && n.parentElement.firstElementChild;
-          while (s) {
-            if (s !== n && chipText(s)) return true;
-            s = s.nextElementSibling;
-          }
-        } catch (_eS) {}
-        n = n.parentElement;
-        if (n === pairEl) break;
-      }
-      return false;
-    }
-    function consider(el) {
-      if (!el || el === pairEl) return;
-      if (hud && (el === hud || hud.contains(el))) return;
-      if (dashEl && (el === dashEl || dashEl.contains(el))) return;
-      if (inMarketList(el) || inAssetListOverlay(el)) return;
-      let inner = "";
-      try { inner = String(el.innerText || ""); } catch (_eT) {}
-      if (reloadRe.test(inner)) return; /* never click PAIR INFORMATION words */
-      if (helpRe.test(inner)) return;
-      if (ownLooksLikePair(inner)) return; /* never the pair label / NZD/USD chip */
-      if (ASSET_LIST_OPENER_RE.test(inner)) return;
-      const tag = String(el.tagName || "").toLowerCase();
-      if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a" && tag !== "div") return;
-      let r;
-      try { r = el.getBoundingClientRect(); } catch (_e1) { return; }
-      if (!r || r.width < 4 || r.height < 4) return;
-      if (r.width > 36 || r.height > 36) return;
-      if (!isVisibleNode(el)) return;
-      if (r.left < 80) return; /* left-rail Help/FAQ (i) */
-      const midPairY = pairRect.top + pairRect.height / 2;
-      const midElY = r.top + r.height / 2;
-      if (Math.abs(midElY - midPairY) > 44) return; /* same row as pair label */
-      if (r.left > pairRect.right + 220) return;
-      if (r.right < pairRect.left - 90) return;
-      let title = "", cls = "", aria = "", role = "", id = "";
-      try {
-        title = String((el.getAttribute && el.getAttribute("title")) || "");
-        aria = String((el.getAttribute && el.getAttribute("aria-label")) || "");
-        role = String((el.getAttribute && el.getAttribute("role")) || "");
-        cls = String(el.className && el.className.baseVal != null ? el.className.baseVal : el.className || "");
-        id = String(el.id || "");
-      } catch (_e2) {}
-      if (helpRe.test(title) || helpRe.test(aria) || helpRe.test(cls) || helpRe.test(id)) return;
-      if (CHEVRON_RE.test(title) || CHEVRON_RE.test(aria) || CHEVRON_RE.test(cls) || CHEVRON_RE.test(id) || CHEVRON_RE.test(inner)) return;
-      if (ASSET_LIST_OPENER_RE.test(title) || ASSET_LIST_OPENER_RE.test(aria) || ASSET_LIST_OPENER_RE.test(immediateLabelText(el))) return;
-      const circle = Math.abs(r.width - r.height) < 8;
-      if (!circle) return; /* only the circular (i) */
-      const namedInfo = infoRe.test(title) || infoRe.test(aria) || infoRe.test(cls) || infoRe.test(id);
-      const chip = onPairInfoChip(el);
-      /* (a) named info, or (b) nearby PAIR INFORMATION chip while own text is not those words */
-      if (!namedInfo && !(chip && !reloadRe.test(inner))) return;
-      let score = 0;
-      if (namedInfo) score += 60;
-      if (chip && circle) score += 70;
-      else if (chip) score += 45;
-      if (tag === "button" || role === "button" || tag === "a") score += 12;
-      if (tag === "svg" || tag === "i") score += 10;
-      if (circle) score += 16;
-      if (r.left >= pairRect.right - 4 && r.left <= pairRect.right + 220) {
-        score += Math.max(0, 30 - Math.floor(Math.abs(r.left - pairRect.right) / 8));
-      }
-      if (score <= 0) return;
-      found.push({ el: el, score: score, r: r });
-    }
-    let scope = pairEl;
-    for (let d = 0; d < 5 && scope; d++) {
-      const p = scope.parentElement;
-      if (!p) break;
-      try {
-        const kids = p.querySelectorAll("button, svg, span, i, a, div");
-        const nAll = kids.length;
-        const nMax = Math.min(nAll, 200);
-        for (let i = 0; i < nMax; i++) consider(kids[i]);
-      } catch (_e3) {}
-      scope = p;
-    }
-    if (!found.length) {
-      try { moveHudOffPair(pairRect, null); } catch (_eM0) {}
-      return;
-    }
-    found.sort(function (a, b) { return b.score - a.score; });
-    try { moveHudOffPair(pairRect, found[0].r); } catch (_eM) {}
-    let clickEl = found[0].el;
-    try {
-      const par = clickEl.parentElement;
-      if (par && par !== pairEl) {
-        const ptag = String(par.tagName || "").toLowerCase();
-        const prole = String((par.getAttribute && par.getAttribute("role")) || "");
-        let pinner = "", ptitle = "", paria = "", pcls = "", pid = "";
-        try { pinner = String(par.innerText || ""); } catch (_ePi) {}
-        try {
-          ptitle = String((par.getAttribute && par.getAttribute("title")) || "");
-          paria = String((par.getAttribute && par.getAttribute("aria-label")) || "");
-          pcls = String(par.className && par.className.baseVal != null ? par.className.baseVal : par.className || "");
-          pid = String(par.id || "");
-        } catch (_ePm) {}
-        const pr = par.getBoundingClientRect();
-        const pcircle = pr && Math.abs(pr.width - pr.height) < 8;
-        const pnamed = infoRe.test(ptitle) || infoRe.test(paria) || infoRe.test(pcls) || infoRe.test(pid);
-        if (
-          (ptag === "button" || prole === "button" || ptag === "a") &&
-          pr && pr.width <= 36 && pr.height <= 36 && pcircle &&
-          !reloadRe.test(pinner) && !helpRe.test(pinner) && !ownLooksLikePair(pinner) &&
-          !CHEVRON_RE.test(ptitle + paria + pcls + pid + pinner) &&
-          !ASSET_LIST_OPENER_RE.test(pinner) && !ASSET_LIST_OPENER_RE.test(ptitle) && !ASSET_LIST_OPENER_RE.test(paria) &&
-          (pnamed || onPairInfoChip(par))
-        ) clickEl = par;
-      }
-    } catch (_eP) {}
-    try { realishClick(clickEl); } catch (_eC) {}
+    /* v0.9.23-ext: disabled. Untrusted synthetic clicks on (i) / pair name
+       opened the asset list, not PAIR INFORMATION. Price comes from the
+       right-edge live tag via elementsFromPoint. Never click to get price. */
+    return;
   }
 
   const quoteSeen = {};
@@ -1545,10 +1517,20 @@
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
       return true;
     }
-    let pn = readPriceNow();
+    /* (a) live tag via elementsFromPoint on the chart right edge */
+    const tag = readLiveTagByHit();
+    if (tag && tag.el) bindLivePriceObserver(tag.el);
+    if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
+    if (tag && ok(tag.v) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
+      rememberQuotes([tag.v]);
+      state.lastGoodPx = tag.v;
+      return tag.v;
+    }
+    /* (b) Price Now only if the popup happens to already be open. Never click (i). */
+    const pn = readPriceNow();
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
-      bindLivePriceObserver(pn.el);
+      if (!(tag && tag.el)) bindLivePriceObserver(pn.el);
     }
     if (pn && ok(pn.v)) {
       rememberQuotes([pn.v]);
@@ -1557,38 +1539,11 @@
       if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
       return pn.v;
     }
-    ensurePairInfoOpen();
-    pn = readPriceNow();
-    if (pn && pn.el) {
-      lastPriceNowEl = pn.el;
-      bindLivePriceObserver(pn.el);
-    }
-    if (pn && ok(pn.v)) {
-      rememberQuotes([pn.v]);
-      state.lastGoodPx = pn.v;
-      lastPnAt = Date.now();
-      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
-      return pn.v;
-    }
-    /* Keep last good Price Now up to 2s on a single parse miss while popup is still open. */
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
       return state.lastGoodPx;
     }
-    if (lastPriceNowOpen) {
-      if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
-      return null;
-    }
-    const axis = readAxisLivePrice();
-    if (diag) {
-      diag.axis = lastAxisScanN;
-      diag.cand = 0;
-    }
-    if (axis && ok(axis.v) && axis.el && !inMarketList(axis.el)) {
-      rememberQuotes([axis.v]);
-      state.lastGoodPx = axis.v;
-      return axis.v;
-    }
+    /* (c) else null (HUD —). Do not scrape market-list candidates. */
     return null;
   }
 
@@ -1653,6 +1608,7 @@
     return m ? (m[1].toUpperCase() + "/" + m[2].toUpperCase()) : null;
   }
 
+  /* Open chart pair only. Ignore asset-list overlay rows. */
   function visiblePair() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
@@ -2237,8 +2193,7 @@
       if (lastPx != null) {
         log("OTC price " + p.label + " = " + lastPx + " · " + ticks.length + " tick");
       } else {
-        const peek = peekQuotes(p.label);
-        log("OTC miss · axis" + lastAxisScanN + " cand" + peek.n);
+        log("OTC miss · axis" + lastAxisScanN + " cand0");
       }
 
       const hist = denseBars(p.label);
@@ -2717,7 +2672,6 @@
         const row = root.querySelectorAll(".row b")[3];
         if (row) row.textContent = "—";
       }
-      ensurePairInfoOpen();
       const sig = "OTC miss · axis" + miss.axis + " cand" + miss.cand;
       const now = Date.now();
       if (sig !== lastMissSig || now - lastMissLogAt > 4000) {
@@ -2755,6 +2709,11 @@
   }
 
   function bindAxisObserver() {
+    const tag = readLiveTagByHit();
+    if (tag && tag.el) {
+      bindLivePriceObserver(tag.el);
+      return;
+    }
     if (lastPriceNowEl && lastPriceNowEl.isConnected === false) lastPriceNowEl = null;
     if (lastPriceNowEl && lastPriceNowEl.isConnected) {
       bindLivePriceObserver(lastPriceNowEl);
@@ -2764,11 +2723,7 @@
     if (pn && pn.el) {
       lastPriceNowEl = pn.el;
       bindLivePriceObserver(pn.el);
-      return;
     }
-    const axis = readAxisLivePrice();
-    if (!axis || !axis.el) return;
-    bindLivePriceObserver(axis.el.parentElement || axis.el);
   }
 
   function startQuoteObserver() {
