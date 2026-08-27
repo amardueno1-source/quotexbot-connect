@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.4
+// @version      0.8.5
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.4";
+  const FILE_VER = "0.8.5";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -318,6 +318,10 @@ if (window.__quotexbotAbortInstalled) {
     for (const el of nodes) {
       if (seen.has(el)) continue;
       seen.add(el);
+      try {
+        if (el.id === "quotexbot-hud" || el.id === "quotexbot-dash") continue;
+        if (el.closest && (el.closest("#quotexbot-hud") || el.closest("#quotexbot-dash"))) continue;
+      } catch (_bot) {}
       if (!isVisible(el)) continue;
       out.push(el);
     }
@@ -346,8 +350,14 @@ if (window.__quotexbotAbortInstalled) {
       }
       if (!dir) continue;
       const target = clickableAncestor(el);
+      try {
+        if (target.closest && (target.closest("#quotexbot-hud") || target.closest("#quotexbot-dash"))) continue;
+      } catch (_bot2) {}
       const r = target.getBoundingClientRect();
-      scored.push({ dir, el: target, area: r.width * r.height, text: text || aria });
+      const wide = typeof window !== "undefined" ? window.innerWidth : 1200;
+      const area = r.width * r.height;
+      const rightBonus = r.left > wide * 0.55 ? 80000 : 0;
+      scored.push({ dir, el: target, area: area + rightBonus, text: text || aria });
     }
     scored.sort((a, b) => b.area - a.area);
     for (const s of scored) {
@@ -527,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.4",
+    version: "0.8.5",
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
@@ -535,7 +545,7 @@ if (window.__quotexbotAbortInstalled) {
     maxAuto: 10,
     cooldownMs: 65000,
     barBucketMs: 15000,
-    minTicks: 3,
+    minTicks: 2,
     sampleTicks: 16,
     sampleMs: 250,
     recordMs: 400,
@@ -700,28 +710,58 @@ if (window.__quotexbotAbortInstalled) {
     return found;
   }
 
+  function forEachRoot(cb) {
+    const roots = [document];
+    try {
+      const ifs = document.querySelectorAll("iframe");
+      for (let i = 0; i < ifs.length; i++) {
+        try {
+          const d = ifs[i].contentDocument;
+          if (d) roots.push(d);
+        } catch (_e) {}
+      }
+    } catch (_e2) {}
+    for (let r = 0; r < roots.length; r++) {
+      cb(roots[r]);
+      try {
+        const all = roots[r].querySelectorAll("*");
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) cb(all[i].shadowRoot);
+        }
+      } catch (_e3) {}
+    }
+  }
+
   function readAxisLivePrice() {
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
     const wide = window.innerWidth || 1200;
-    const leftMin = wide * (CONFIG.axisRightFrac || 0.68);
-    const nodes = document.querySelectorAll("span, div, b, strong, label, em");
+    const leftMin = wide * (CONFIG.axisRightFrac || 0.55);
     const hits = [];
+    const nodes = [];
+    forEachRoot(function (root) {
+      try {
+        const list = root.querySelectorAll("span, div, b, strong, label, em, p, text, tspan");
+        for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+      } catch (_e0) {}
+    });
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
       let t = "";
-      try { t = (el.innerText || "").replace(/[\s\u00a0]/g, "").replace(/,/g, ""); } catch (_e) { continue; }
-      if (!t || t.length > 16) continue;
-      const m = t.match(/^(\d{1,4}\.\d{2,6})$/);
+      try {
+        t = (el.innerText || el.textContent || "").replace(/[\s\u00a0]/g, "").replace(/,/g, "");
+      } catch (_e) { continue; }
+      if (!t || t.length > 28) continue;
+      const m = t.match(/(\d{1,4}\.\d{2,6})/);
       if (!m) continue;
       const v = parseFloat(m[1]);
       if (!isFinite(v) || v < 0.4 || v >= 9000) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
-      if (!r || r.left < leftMin || r.width < 8 || r.height < 8) continue;
-      if (r.top < 40 || r.top > (window.innerHeight || 800) * 0.9) continue;
+      if (!r || r.left < leftMin || r.width < 4 || r.height < 4) continue;
+      if (r.top < 24 || r.top > (window.innerHeight || 800) * 0.95) continue;
       let font = 12;
       let bg = "";
       try {
@@ -768,10 +808,6 @@ if (window.__quotexbotAbortInstalled) {
   async function sampleOtc(label) {
     const ticks = [];
     for (let i = 0; i < CONFIG.sampleTicks; i++) {
-      if (visiblePair() !== label) {
-        await sleep(CONFIG.sampleMs);
-        continue;
-      }
       const px = readLivePrice(label);
       if (px != null) ticks.push(px);
       await sleep(CONFIG.sampleMs);
@@ -841,7 +877,15 @@ if (window.__quotexbotAbortInstalled) {
       if (!r || r.width < 4 || r.height < 4) continue;
       let font = 12;
       try { font = parseFloat(window.getComputedStyle(el).fontSize || "12"); } catch (_e3) {}
-      const score = font * 8 - r.top + (t.length < 18 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0);
+      let extra = 0;
+      try {
+        const cls = String(el.className || "");
+        const aria = (el.getAttribute && el.getAttribute("aria-selected")) || "";
+        if (aria === "true" || /active|selected|current|is-active|is-current/i.test(cls)) extra += 240;
+        const par = el.parentElement;
+        if (par && /active|selected|current/i.test(String(par.className || ""))) extra += 140;
+      } catch (_e4) {}
+      const score = font * 8 - r.top + (t.length < 18 ? 40 : 0) + (/OTC/i.test(t) ? 50 : 0) + extra;
       if (score > bestScore) { bestScore = score; best = lab; }
     }
     if (best) return best;
