@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.2
+// @version      0.9.3
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.9.2";
+  const FILE_VER = "0.9.3";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.2",
+    version: "0.9.3",
     minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
@@ -574,6 +574,7 @@ if (window.__quotexbotAbortInstalled) {
       "USD/BRL": [3, 9],
       "USD/DZD": [80, 200],
       "NZD/CAD": [0.75, 1.05],
+      "USD/BDT": [90, 160],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -665,7 +666,7 @@ if (window.__quotexbotAbortInstalled) {
     const r = CONFIG.ranges[p];
     if (r) return { lo: r[0], hi: r[1] };
     if (/JPY/i.test(p)) return { lo: 90, hi: 260 };
-    if (/COP|BRL|ARS|CLP|INR|IDR|KRW|NGN|DZD|EGP|VND|PKR|TRY|MXN|ZAR|PHP|THB|MYR/i.test(p)) {
+    if (/COP|BRL|ARS|CLP|INR|IDR|KRW|NGN|DZD|EGP|VND|PKR|TRY|MXN|ZAR|PHP|THB|MYR|BDT|LKR|NPR/i.test(p)) {
       return { lo: 1, hi: 100000 };
     }
     const learned = state.learnedRange && state.learnedRange[p];
