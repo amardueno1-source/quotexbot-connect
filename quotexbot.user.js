@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.9.26
+// @version      0.9.27
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -576,7 +576,7 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.26",
+    version: "0.9.27",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1178,14 +1178,35 @@ if (window.__quotexbotAbortInstalled) {
       diag.axis = lastAxisScanN;
       diag.cand = all.length;
     }
-    function ok(v) {
+    function quoteDecimals(v, text) {
+      if (text) {
+        const m = String(text).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
+        if (m) return m[1].length;
+      }
+      const s = String(v);
+      const i = s.indexOf(".");
+      return i < 0 ? 0 : s.length - i - 1;
+    }
+    function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
       if (isPnlNumber(v)) return false;
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
+      let text = null, dec = null;
+      if (typeof info === "string") text = info;
+      else if (info && typeof info === "object") {
+        if (info.text) text = info.text;
+        if (info.decimals != null) dec = info.decimals;
+      }
+      if (dec == null) dec = quoteDecimals(v, text);
+      if (v < 2 && dec < 4) return false;
+      if (state.lastGoodPx != null) {
+        const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
+        if (rel > 0.04) return false;
+      }
       return true;
     }
-    const axisOk = !!(axis && ok(axis.v));
+    const axisOk = !!(axis && ok(axis.v, axis));
     const pn = axisOk ? null : readPriceNow();
     rememberQuotes([axis && axis.v, pn && pn.v].concat(all.map(function (c) { return c.v; })).filter(function (x) { return x != null; }));
     if (!axisOk && pn && ok(pn.v)) {
@@ -1195,19 +1216,12 @@ if (window.__quotexbotAbortInstalled) {
     const cands = [];
     if (axisOk) cands.push({ v: axis.v, x: axis.x || 0, font: axis.font || 12, hasBg: axis.hasBg, nearBell: axis.nearBell, y: axis.y || 0, axis: 1 });
     for (let i = 0; i < all.length; i++) {
-      if (ok(all[i].v)) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
+      if (ok(all[i].v, all[i])) cands.push({ v: all[i].v, x: all[i].x || 0, font: all[i].font || 12, hasBg: 0, nearBell: 0, y: all[i].y || 0, axis: 0 });
     }
     if (!cands.length) return null;
     let axisCand = null;
     for (let i = 0; i < cands.length; i++) {
       if (cands[i].axis) { axisCand = cands[i]; break; }
-    }
-    if (axisCand && state.lastGoodPx != null) {
-      const rel = Math.abs(axisCand.v - state.lastGoodPx) / Math.max(state.lastGoodPx, 1e-6);
-      if (rel > 0.04) {
-        state.lastGoodPx = axisCand.v;
-        return axisCand.v;
-      }
     }
     if (lastSeenPair === pairLabel && state.lastGoodPx != null) {
       const near = cands.filter(function (c) {

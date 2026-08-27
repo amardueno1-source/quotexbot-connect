@@ -1,5 +1,5 @@
 /**
- * quotexbot MV3 service worker (v0.9.26-ext)
+ * quotexbot MV3 service worker (v0.9.27-ext)
  *
  * On {type:'capture'} from the DEMO tab content script:
  *   chrome.tabs.captureVisibleTab → crop a strip at the CHART canvas
@@ -76,11 +76,20 @@ function captureOcr(windowId, dpr, rect) {
     return self.DigitOcr.readPriceFromPngDataUrl(dataUrl, {
       rect: rect,
       dpr: dpr
-    }).then(function (v) {
+    }).then(function (got) {
+      var v = null, text = "";
+      if (got != null && typeof got === "object") {
+        v = got.v;
+        text = got.text ? String(got.text) : "";
+      } else {
+        v = got;
+      }
       if (v == null || !isFinite(v) || v < 0.05) {
         return { ok: false, error: "no tag" };
       }
-      return { ok: true, v: v };
+      var resp = { ok: true, v: v };
+      if (text) resp.text = text;
+      return resp;
     });
   });
 }

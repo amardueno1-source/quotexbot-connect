@@ -2,8 +2,11 @@
  * Minimal digit OCR for the Quotex chart-axis live price tag.
  * Tesseract.js wasm/core is several MB per file — too large to vendor.
  * Crops a strip at the largest chart canvas right edge (not the window
- * right / trade sidebar). Reads white digits on a bright blue/cyan
- * rounded rect (e.g. 0.58264). Whitelist 0123456789. PSM-style single line.
+ * right / trade sidebar). Picks the blob with the strongest blue/cyan fill
+ * (highlighted live tag, not gray axis ticks). Upscales that crop ~3×,
+ * then reads the FULL digit string — do not stop at 3 decimals.
+ * Typical quotes: 0.58136 (5 dp), 129.744 (3 dp), 289.76 (2 dp).
+ * Whitelist 0123456789. PSM-style single line.
  */
 (function (root) {
   "use strict";
@@ -120,11 +123,13 @@
         if (seen[start] || !isBlueAt(start)) continue;
         var stack = [start];
         seen[start] = 1;
-        var minX = x, maxX = x, minY = y, maxY = y, count = 0;
+        var minX = x, maxX = x, minY = y, maxY = y, count = 0, chromaSum = 0;
         while (stack.length) {
           var p = stack.pop();
           var px = p % w, py = (p / w) | 0;
+          var o = p * 4;
           count++;
+          chromaSum += (data[o + 2] - data[o]) + (data[o + 2] - data[o + 1]);
           if (px < minX) minX = px;
           if (px > maxX) maxX = px;
           if (py < minY) minY = py;
@@ -140,9 +145,13 @@
             stack.push(q);
           }
         }
+        var bw = maxX - minX + 1, bh = maxY - minY + 1;
+        var fill = count / Math.max(1, bw * bh);
+        var chroma = chromaSum / Math.max(1, count);
         blobs.push({
           minX: minX, minY: minY, maxX: maxX, maxY: maxY,
-          w: maxX - minX + 1, h: maxY - minY + 1, count: count
+          w: bw, h: bh, count: count, fill: fill, chroma: chroma,
+          score: fill * count * Math.max(1, chroma)
         });
       }
     }
@@ -165,8 +174,11 @@
       if (b.count < b.w * b.h * 0.18) continue;
       good.push(b);
     }
+    /* Highlighted live tag is a solid cyan fill; gray ticks score lower. */
     good.sort(function (a, c) {
-      return (c.minX - a.minX) || (c.count - a.count);
+      var as = a.score != null ? a.score : a.count;
+      var cs = c.score != null ? c.score : c.count;
+      return (cs - as) || ((c.fill || 0) - (a.fill || 0)) || (c.count - a.count);
     });
     return good;
   }
@@ -467,12 +479,22 @@
     return parts.join("");
   }
 
+  function decimalPlacesOf(text) {
+    var t = String(text || "").replace(/,/g, ".");
+    var m = t.match(/\d{1,6}\.(\d{1,6})/);
+    return m ? m[1].length : 0;
+  }
+
   function parsePrice(text) {
     if (!text) return null;
-    var t = String(text).replace(/,/g, ".").replace(/[^\d.]/g, "");
-    var m = t.match(PRICE_RE);
-    if (!m) return null;
-    var v = parseFloat(m[1]);
+    var t = String(text).replace(/,/g, ".");
+    var re = /(\d{1,6}\.\d{1,6})/g;
+    var m, best = null;
+    while ((m = re.exec(t))) {
+      if (!best || m[1].length > best.length) best = m[1];
+    }
+    if (!best) return null;
+    var v = parseFloat(best);
     if (!isFinite(v) || v < 0.05) return null;
     return v;
   }
@@ -488,24 +510,29 @@
       blob.h + padY * 2
     );
     if (!crop) return null;
-    var scale = crop.height < 36 ? 4 : crop.height < 56 ? 3 : 2;
+    /* ~3× (4× if the tag is tiny) so 5-decimal glyphs stay separable. */
+    var scale = crop.height < 36 ? 4 : 3;
     var up = scaleNearest(crop, scale);
     var tries = [null, 150, 170, 185, 200];
     var lastText = "";
+    var best = null;
     var t;
-    for (t = 0; t < tries.length; t++) {
-      var bw = toBinary(up, tries[t]);
-      var text = segmentAndRead(bw);
+    function consider(text) {
       if (text) lastText = text;
       var v = parsePrice(text);
-      if (v != null) return { v: v, text: text };
-      var bw2 = dilate4(bw);
-      text = segmentAndRead(bw2);
-      if (text) lastText = text;
-      v = parsePrice(text);
-      if (v != null) return { v: v, text: text };
+      if (v == null) return;
+      var dec = decimalPlacesOf(text);
+      if (!best || dec > best.dec || (dec === best.dec && String(text).length > String(best.text).length)) {
+        best = { v: v, text: text, dec: dec };
+      }
     }
-    return lastText ? { v: null, text: lastText } : null;
+    for (t = 0; t < tries.length; t++) {
+      var bw = toBinary(up, tries[t]);
+      consider(segmentAndRead(bw));
+      consider(segmentAndRead(dilate4(bw)));
+    }
+    if (best) return best;
+    return lastText ? { v: null, text: lastText, dec: 0 } : null;
   }
 
   async function pngToImageData(dataUrl) {
@@ -553,12 +580,18 @@
     var strip = cropChartAxisStrip(img, opts.rect, dpr);
     if (!strip) return null;
     var blobs = pickTagBlobs(findBlueBlobs(strip), dpr);
+    var best = null;
     var i;
     for (i = 0; i < Math.min(blobs.length, 4); i++) {
       var got = ocrBlob(strip, blobs[i]);
-      if (got && got.v != null) return got.v;
+      if (!got || got.v == null) continue;
+      if (!best) { best = got; continue; }
+      var gd = got.dec != null ? got.dec : decimalPlacesOf(got.text);
+      var bd = best.dec != null ? best.dec : decimalPlacesOf(best.text);
+      /* Strongest-fill blob is first; only replace if another read is fuller. */
+      if (gd > bd) best = got;
     }
-    return null;
+    return best;
   }
 
   root.DigitOcr = {

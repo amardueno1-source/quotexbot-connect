@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.26-ext)
+ * quotexbot Chrome MV3 content script (v0.9.27-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -492,7 +492,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.26-ext",
+    version: "0.9.27-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -1500,7 +1500,7 @@
   }
 
   function ensurePairInfoOpen() {
-    /* v0.9.26-ext: still disabled. Never click (i) / pair / asset list.
+    /* v0.9.27-ext: still disabled. Never click (i) / pair / asset list.
        Price comes from a screenshot OCR of the chart-axis live tag. */
     return;
   }
@@ -1572,16 +1572,39 @@
   function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
     const range = priceRange(pairLabel);
-    function ok(v) {
+    function quoteDecimals(v, text) {
+      if (text) {
+        const m = String(text).replace(/,/g, ".").match(/\d{1,6}\.(\d{1,6})/);
+        if (m) return m[1].length;
+      }
+      const s = String(v);
+      const i = s.indexOf(".");
+      return i < 0 ? 0 : s.length - i - 1;
+    }
+    function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
       if (v < range.lo || v > range.hi) return false;
       if (isPnlNumber(v)) return false;
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
+      let text = null, dec = null;
+      if (typeof info === "string") text = info;
+      else if (info && typeof info === "object") {
+        if (info.text) text = info.text;
+        if (info.decimals != null) dec = info.decimals;
+      }
+      if (dec == null) dec = quoteDecimals(v, text);
+      /* FX like NZD/USD is 5 dp (0.58136). 0.535 is a truncated misread. */
+      if (v < 2 && dec < 4) return false;
+      /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
+      if (state.lastGoodPx != null) {
+        const rel = Math.abs(v - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
+        if (rel > 0.04) return false;
+      }
       return true;
     }
     if (diag) { diag.axis = lastAxisScanN; diag.cand = 0; }
     /* (a) last canvas-OCR value if fresh (<1.5s) and ok(range) */
-    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 1500 && ok(lastCanvasOcr.v)) {
+    if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 1500 && ok(lastCanvasOcr.v, lastCanvasOcr)) {
       rememberQuotes([lastCanvasOcr.v]);
       state.lastGoodPx = lastCanvasOcr.v;
       return lastCanvasOcr.v;
@@ -1589,7 +1612,7 @@
     /* (b) hit-test if it ever works (elementsFromPoint often sees only canvas) */
     const tag = readLiveTagByHit();
     if (tag && tag.el) bindLivePriceObserver(tag.el);
-    if (tag && ok(tag.v) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
+    if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
       rememberQuotes([tag.v]);
       state.lastGoodPx = tag.v;
       return tag.v;
@@ -2825,7 +2848,7 @@
             logCanvasMiss();
             return;
           }
-          lastCanvasOcr = { v: v, at: Date.now() };
+          lastCanvasOcr = { v: v, at: Date.now(), text: resp.text ? String(resp.text) : "" };
           try { onQuoteTick(); } catch (_e1) {}
         }
       );
