@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         quotexbot Connect
 // @namespace    https://github.com/amardueno1-source/quotexbot-connect
-// @version      0.8.5
+// @version      0.8.6
 // @description  DEMO HUD: axis live price, self-update+reload after GitHub push. No cookies/SSID.
 // @author       amardueno1-source
 // @match        https://market-qx.info/*
@@ -57,7 +57,7 @@
     return false;
   }
   if (window.__quotexbotFromPayload) return;
-  const FILE_VER = "0.8.5";
+  const FILE_VER = "0.8.6";
   const PK = "quotexbot_script_payload";
   const PV = "quotexbot_script_payload_ver";
   let cachedVer = "";
@@ -537,7 +537,8 @@ if (window.__quotexbotAbortInstalled) {
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.8.5",
+    version: "0.8.6",
+    minWaitMs: 8000,
     axisRightFrac: 0.68,
     updateUrl: "https://raw.githubusercontent.com/amardueno1-source/quotexbot-connect/main/quotexbot.user.js",
     checkUpdateMs: 120000,
@@ -658,7 +659,12 @@ if (window.__quotexbotAbortInstalled) {
     const p = pairLabel || "";
     const r = CONFIG.ranges[p];
     if (r) return { lo: r[0], hi: r[1] };
-    if (/JPY/i.test(p)) return { lo: 90, hi: 250 };
+    if (/JPY/i.test(p)) return { lo: 90, hi: 260 };
+    if (/COP|BRL|ARS|CLP|INR|IDR|KRW|NGN|DZD|EGP|VND|PKR|TRY|MXN|ZAR|PHP|THB|MYR/i.test(p)) {
+      return { lo: 1, hi: 100000 };
+    }
+    const learned = state.learnedRange && state.learnedRange[p];
+    if (learned) return learned;
     return { lo: 0.05, hi: 20 };
   }
 
@@ -754,14 +760,14 @@ if (window.__quotexbotAbortInstalled) {
         t = (el.innerText || el.textContent || "").replace(/[\s\u00a0]/g, "").replace(/,/g, "");
       } catch (_e) { continue; }
       if (!t || t.length > 28) continue;
-      const m = t.match(/(\d{1,4}\.\d{2,6})/);
+      const m = t.match(/(\d{1,6}\.\d{2,6})/);
       if (!m) continue;
       const v = parseFloat(m[1]);
-      if (!isFinite(v) || v < 0.4 || v >= 9000) continue;
+      if (!isFinite(v) || v < 0.4 || v >= 1000000) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
       if (!r || r.left < leftMin || r.width < 4 || r.height < 4) continue;
-      if (r.top < 24 || r.top > (window.innerHeight || 800) * 0.95) continue;
+      if (r.top < 70 || r.top > (window.innerHeight || 800) * 0.92) continue;
       let font = 12;
       let bg = "";
       try {
@@ -778,21 +784,33 @@ if (window.__quotexbotAbortInstalled) {
       hits.push({ v: v, font: font, y: r.top, x: r.left, nearBell: nearBell, hasBg: hasBg, decimals: (m[1].split(".")[1] || "").length, el: el });
     }
     if (!hits.length) return null;
+    const midY = (window.innerHeight || 800) * 0.45;
     hits.sort(function (a, b) {
-      return (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (b.decimals - a.decimals) || (b.x - a.x) || (b.font - a.font);
+      const da = Math.abs(a.y - midY);
+      const db = Math.abs(b.y - midY);
+      return (b.hasBg - a.hasBg) || (b.nearBell - a.nearBell) || (da - db) || (b.x - a.x) || (b.font - a.font);
     });
     return hits[0];
   }
 
   function readLivePrice(pairLabel) {
-    const axis = readAxisLivePrice();
-    if (axis && axis.v != null) return axis.v;
     const range = priceRange(pairLabel);
+    const axis = readAxisLivePrice();
+    if (axis && axis.v != null) {
+      if (!range || (axis.v >= range.lo && axis.v <= range.hi) || range.hi >= 1000) {
+        if (pairLabel) {
+          if (!state.learnedRange || typeof state.learnedRange !== "object") state.learnedRange = {};
+          const pad = Math.max(axis.v * 0.35, 1);
+          state.learnedRange[pairLabel] = { lo: Math.max(0.01, axis.v - pad), hi: axis.v + pad };
+        }
+        if (!range || axis.v >= range.lo * 0.5) return axis.v;
+      }
+    }
     const all = scrapeQuoteCandidates();
     const hit = all.filter(function (c) { return c.v >= range.lo && c.v <= range.hi; });
-    if (!hit.length) return null;
+    if (!hit.length) return (axis && axis.v != null) ? axis.v : null;
     hit.sort(function (a, b) {
-      return (b.decimals - a.decimals) || (b.font - a.font) || (b.area - a.area);
+      return (b.font - a.font) || (b.area - a.area);
     });
     return hit[0].v;
   }
@@ -1110,8 +1128,40 @@ if (window.__quotexbotAbortInstalled) {
     return false;
   }
 
+  let lastTradesFp = "";
+  function tradesFingerprint() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const bits = [];
+    const nodes = document.querySelectorAll("div, span, li, p, b");
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || hud.contains(el))) continue;
+      if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e) { continue; }
+      if (!r || r.left < wide * 0.58 || r.width < 8) continue;
+      let t = "";
+      try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
+      if (!t || t.length > 36) continue;
+      if (/[+$\-−]\s*\$?\s*\d+(?:\.\d+)?|\d+\.\d+\s*\$/.test(t)) bits.push(t);
+      if (bits.length >= 10) break;
+    }
+    return bits.join("|");
+  }
+
   function tradeOpen() {
-    return Boolean(lastClickAt && Date.now() - lastClickAt < CONFIG.cooldownMs);
+    if (!lastClickAt) return false;
+    const age = Date.now() - lastClickAt;
+    const minW = CONFIG.minWaitMs || 8000;
+    if (age < minW) return true;
+    if (age >= CONFIG.cooldownMs) return false;
+    try {
+      const fp = tradesFingerprint();
+      if (lastTradesFp && fp && fp !== lastTradesFp) return false;
+    } catch (_e) {}
+    return true;
   }
 
   function snapDoc() {
@@ -1143,7 +1193,9 @@ if (window.__quotexbotAbortInstalled) {
         return;
       }
       if (tradeOpen()) {
-        state.lastReason = "ট্রেড চলছে, অপেক্ষা"; log("আগের ট্রেড শেষ হয়নি, অপেক্ষা");
+        const left = Math.max(0, CONFIG.cooldownMs - (Date.now() - lastClickAt));
+        state.lastReason = "ট্রেড চলছে, অপেক্ষা " + Math.ceil(left / 1000) + "s";
+        log("আগের ট্রেডের ফলাফল/কুলডাউন, অপেক্ষা " + Math.ceil(left / 1000) + "s");
         saveState(state); render();
         return;
       }
@@ -1219,6 +1271,7 @@ if (window.__quotexbotAbortInstalled) {
       if (r.ok) {
         state.autoCount += 1;
         lastClickAt = Date.now();
+        try { lastTradesFp = tradesFingerprint(); } catch (_fp) { lastTradesFp = ""; }
         state.lastReason = d.signal + " " + p.label + " · " + d.reason; log("ক্লিক OK: " + d.signal + " " + p.label);
       } else {
         state.lastReason = p.label + " সিগন্যাল, ক্লিক হয়নি"; log("ক্লিক FAIL: " + p.label + " বাটন পাইনি");
