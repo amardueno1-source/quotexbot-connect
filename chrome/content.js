@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.21-ext)
+ * quotexbot Chrome MV3 content script (v0.9.22-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -485,7 +485,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.21-ext",
+    version: "0.9.22-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -550,6 +550,7 @@
   let lastPnAt = 0;
   let lastPairInfoClickAt = 0;
   let lastPairInfoClickPair = "";
+  let lastAssetListDismissAt = 0;
   let lastAxisScanN = 0;
   let lastHudSig = "";
   let topHudYielded = false;
@@ -990,7 +991,8 @@
     const dashEl = document.getElementById("quotexbot-dash");
     if (hud && (el === hud || hud.contains(el))) return true;
     if (dashEl && (el === dashEl || dashEl.contains(el))) return true;
-    const listRe = /asset|currencies|most traded|search/i;
+    const listRe = /asset|currencies|most traded|search|select trade pair/i;
+    const headingRe = /select trade pair/i;
     const priceNowRe = /price\s*now/i;
     const wide = window.innerWidth || 1200;
     const high = window.innerHeight || 800;
@@ -1001,6 +1003,7 @@
         try { t = String(cur.innerText || "").slice(0, 1500); } catch (_eT) {}
         if (t && priceNowRe.test(t)) return false;
         const r = cur.getBoundingClientRect();
+        if (t && headingRe.test(t) && r && r.width >= 160 && r.height >= 120) return true;
         if (r && r.width >= 160 && r.height >= 160 && r.width <= wide * 0.58 && r.height <= high * 0.92) {
           if (t && listRe.test(t)) return true;
           let inp = null;
@@ -1009,6 +1012,58 @@
             const meta = String((inp.getAttribute("placeholder") || "") + " " + (inp.getAttribute("aria-label") || "") + " " + (inp.type || "") + " " + (inp.getAttribute("name") || ""));
             if (/search|asset|currenc/i.test(meta) || String(inp.type || "").toLowerCase() === "search") return true;
           }
+        }
+      } catch (_e0) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  const ASSET_LIST_HEADING_RE = /select trade pair/i;
+  const ASSET_LIST_OPENER_RE = /select trade pair|most traded|currencies/i;
+  const CHEVRON_RE = /\b(?:chevron|caret|arrow|dropdown|expand)\b/i;
+
+  function isAssetListOpen() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let open = false;
+    forEachRoot(function (root) {
+      if (open) return;
+      try {
+        const list = root.querySelectorAll("h1, h2, h3, h4, div, span, p, label, section, aside, header");
+        const nMax = Math.min(list.length, 400);
+        for (let i = 0; i < nMax; i++) {
+          const el = list[i];
+          if (hud && (el === hud || hud.contains(el))) continue;
+          if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+          let t = "";
+          try { t = String(el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+          if (!t || t.length > 64) continue;
+          if (!ASSET_LIST_HEADING_RE.test(t)) continue;
+          if (!isVisibleNode(el)) continue;
+          open = true;
+          return;
+        }
+      } catch (_e0) {}
+    });
+    return open;
+  }
+
+  function inAssetListOverlay(el) {
+    if (!el) return false;
+    if (inMarketList(el)) return true;
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    if (hud && (el === hud || hud.contains(el))) return false;
+    if (dashEl && (el === dashEl || dashEl.contains(el))) return false;
+    let cur = el;
+    for (let d = 0; d < 10 && cur && cur !== document.body && cur !== document.documentElement; d++) {
+      try {
+        let t = "";
+        try { t = String(cur.innerText || "").slice(0, 2000); } catch (_eT) { t = ""; }
+        if (t && ASSET_LIST_HEADING_RE.test(t)) {
+          const r = cur.getBoundingClientRect();
+          if (r && r.width >= 160 && r.height >= 120) return true;
         }
       } catch (_e0) {}
       cur = cur.parentElement;
@@ -1100,6 +1155,7 @@
       if (hud && (el === hud || hud.contains(el))) return;
       if (dashEl && (el === dashEl || dashEl.contains(el))) return;
       if (inMarketList(el)) return;
+      if (inAssetListOverlay(el)) return;
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { return; }
       if (!t || t.length > 48) return;
@@ -1192,12 +1248,59 @@
     try { el.dispatchEvent(new MouseEvent("click", up)); } catch (_e4) {}
   }
 
+  function dismissAssetList() {
+    try {
+      const opts = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true, view: window };
+      const t = document.activeElement || document.body || document.documentElement;
+      t.dispatchEvent(new KeyboardEvent("keydown", opts));
+      document.dispatchEvent(new KeyboardEvent("keydown", opts));
+      t.dispatchEvent(new KeyboardEvent("keyup", opts));
+      document.dispatchEvent(new KeyboardEvent("keyup", opts));
+    } catch (_e0) {}
+    try {
+      const hud = document.getElementById("quotexbot-hud");
+      const dashEl = document.getElementById("quotexbot-dash");
+      const wide = window.innerWidth || 1200;
+      const high = window.innerHeight || 800;
+      const nodes = document.querySelectorAll("div");
+      const nMax = Math.min(nodes.length, 200);
+      for (let i = 0; i < nMax; i++) {
+        const el = nodes[i];
+        if (hud && (el === hud || hud.contains(el))) continue;
+        if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+        let t = "";
+        try { t = String(el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { continue; }
+        if (ASSET_LIST_HEADING_RE.test(t) || /most traded/i.test(t)) continue;
+        let r, cs;
+        try { r = el.getBoundingClientRect(); cs = window.getComputedStyle(el); } catch (_e1) { continue; }
+        if (!r || r.width < wide * 0.85 || r.height < high * 0.85) continue;
+        if (!isVisibleNode(el)) continue;
+        const pos = String((cs && cs.position) || "");
+        if (pos !== "fixed" && pos !== "absolute") continue;
+        const bg = (cs && cs.backgroundColor) || "";
+        const op = parseFloat((cs && cs.opacity) || "1");
+        if (!(op < 1 || /rgba\(/i.test(bg))) continue;
+        realishClick(el);
+        break;
+      }
+    } catch (_e1) {}
+  }
+
   function ensurePairInfoOpen() {
     const pair = lastSeenPair || visiblePair();
     const pn = readPriceNow();
     if (pn && pair) {
       const range = priceRange(pair);
       if (pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) return;
+    }
+    /* Asset list already open: never hunt (i). Try Escape / backdrop. */
+    if (isAssetListOpen()) {
+      const now0 = Date.now();
+      if (now0 - lastAssetListDismissAt >= 800) {
+        lastAssetListDismissAt = now0;
+        dismissAssetList();
+      }
+      return;
     }
     const now = Date.now();
     /* After a pair switch, click (i) again immediately for the new pair. */
@@ -1215,19 +1318,55 @@
     const reloadRe = /pair information/i;
     const helpRe = /help|faq/i;
     const found = [];
+    function ownLooksLikePair(inner) {
+      const t = String(inner || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 48) return false;
+      if (pair) {
+        const pairRe = new RegExp(String(pair).replace("/", "\\s*/\\s*") + "(?:\\s*\\(?OTC\\)?)?", "i");
+        if (pairRe.test(t)) return true;
+      }
+      return !!labelFromText(t);
+    }
+    function immediateLabelText(el) {
+      const parts = [];
+      try { parts.push(String((el.getAttribute && el.getAttribute("title")) || "")); } catch (_e0) {}
+      try { parts.push(String((el.getAttribute && el.getAttribute("aria-label")) || "")); } catch (_e1) {}
+      try { parts.push(String(el.innerText || "")); } catch (_e2) {}
+      try {
+        const p = el.parentElement;
+        if (p) {
+          const t = String(p.innerText || "").replace(/\s+/g, " ").trim();
+          let pr;
+          try { pr = p.getBoundingClientRect(); } catch (_eR) { pr = null; }
+          if (t.length < 64 && pr && pr.width <= 280 && pr.height <= 52) parts.push(t);
+        }
+      } catch (_e3) {}
+      return parts.join(" ");
+    }
     function onPairInfoChip(el) {
-      let n = el;
-      for (let u = 0; u < 6 && n; u++) {
-        if (n === pairEl) break;
+      function chipText(n) {
+        if (!n || n === pairEl) return false;
         let t = "";
         try { t = String(n.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { t = ""; }
-        if (reloadRe.test(t) && t.length < 64) {
-          try {
-            const cr = n.getBoundingClientRect();
-            if (cr.width <= 280 && cr.height <= 52 && cr.left >= pairRect.left - 8) return true;
-          } catch (_eC) { return true; }
-        }
+        if (!reloadRe.test(t) || t.length >= 64) return false;
+        try {
+          const cr = n.getBoundingClientRect();
+          if (cr.width <= 280 && cr.height <= 52 && cr.left >= pairRect.left - 8) return true;
+        } catch (_eC) { return true; }
+        return false;
+      }
+      let n = el;
+      for (let u = 0; u < 6 && n; u++) {
+        if (chipText(n)) return true;
+        try {
+          let s = n.parentElement && n.parentElement.firstElementChild;
+          while (s) {
+            if (s !== n && chipText(s)) return true;
+            s = s.nextElementSibling;
+          }
+        } catch (_eS) {}
         n = n.parentElement;
+        if (n === pairEl) break;
       }
       return false;
     }
@@ -1235,11 +1374,13 @@
       if (!el || el === pairEl) return;
       if (hud && (el === hud || hud.contains(el))) return;
       if (dashEl && (el === dashEl || dashEl.contains(el))) return;
-      if (inMarketList(el)) return;
+      if (inMarketList(el) || inAssetListOverlay(el)) return;
       let inner = "";
       try { inner = String(el.innerText || ""); } catch (_eT) {}
-      if (reloadRe.test(inner)) return;
+      if (reloadRe.test(inner)) return; /* never click PAIR INFORMATION words */
       if (helpRe.test(inner)) return;
+      if (ownLooksLikePair(inner)) return; /* never the pair label / NZD/USD chip */
+      if (ASSET_LIST_OPENER_RE.test(inner)) return;
       const tag = String(el.tagName || "").toLowerCase();
       if (tag !== "button" && tag !== "svg" && tag !== "span" && tag !== "i" && tag !== "a" && tag !== "div") return;
       let r;
@@ -1251,32 +1392,35 @@
       const midPairY = pairRect.top + pairRect.height / 2;
       const midElY = r.top + r.height / 2;
       if (Math.abs(midElY - midPairY) > 44) return; /* same row as pair label */
-      /* (i) sits on the PAIR INFORMATION chip to the RIGHT of the pair name. */
       if (r.left > pairRect.right + 220) return;
       if (r.right < pairRect.left - 90) return;
-      let title = "", cls = "", aria = "", role = "";
+      let title = "", cls = "", aria = "", role = "", id = "";
       try {
         title = String((el.getAttribute && el.getAttribute("title")) || "");
         aria = String((el.getAttribute && el.getAttribute("aria-label")) || "");
         role = String((el.getAttribute && el.getAttribute("role")) || "");
         cls = String(el.className && el.className.baseVal != null ? el.className.baseVal : el.className || "");
+        id = String(el.id || "");
       } catch (_e2) {}
-      if (helpRe.test(title) || helpRe.test(aria) || helpRe.test(cls) || helpRe.test(String(el.id || ""))) return;
+      if (helpRe.test(title) || helpRe.test(aria) || helpRe.test(cls) || helpRe.test(id)) return;
+      if (CHEVRON_RE.test(title) || CHEVRON_RE.test(aria) || CHEVRON_RE.test(cls) || CHEVRON_RE.test(id) || CHEVRON_RE.test(inner)) return;
+      if (ASSET_LIST_OPENER_RE.test(title) || ASSET_LIST_OPENER_RE.test(aria) || ASSET_LIST_OPENER_RE.test(immediateLabelText(el))) return;
+      const circle = Math.abs(r.width - r.height) < 8;
+      if (!circle) return; /* only the circular (i) */
+      const namedInfo = infoRe.test(title) || infoRe.test(aria) || infoRe.test(cls) || infoRe.test(id);
       const chip = onPairInfoChip(el);
-      const circle = Math.abs(r.width - r.height) < 8 && r.width <= 28;
-      const namedInfo = infoRe.test(title) || infoRe.test(aria) || infoRe.test(cls) || infoRe.test(String(el.id || ""));
+      /* (a) named info, or (b) nearby PAIR INFORMATION chip while own text is not those words */
+      if (!namedInfo && !(chip && !reloadRe.test(inner))) return;
       let score = 0;
       if (namedInfo) score += 60;
       if (chip && circle) score += 70;
       else if (chip) score += 45;
-      else if (circle && r.left >= pairRect.right - 4 && r.left <= pairRect.right + 220) score += 40;
       if (tag === "button" || role === "button" || tag === "a") score += 12;
       if (tag === "svg" || tag === "i") score += 10;
       if (circle) score += 16;
       if (r.left >= pairRect.right - 4 && r.left <= pairRect.right + 220) {
         score += Math.max(0, 30 - Math.floor(Math.abs(r.left - pairRect.right) / 8));
       }
-      if (r.right <= pairRect.left + 8 && r.left < pairRect.left + 2) score += 8;
       if (score <= 0) return;
       found.push({ el: el, score: score, r: r });
     }
@@ -1301,15 +1445,28 @@
     let clickEl = found[0].el;
     try {
       const par = clickEl.parentElement;
-      if (par) {
+      if (par && par !== pairEl) {
         const ptag = String(par.tagName || "").toLowerCase();
         const prole = String((par.getAttribute && par.getAttribute("role")) || "");
-        let pinner = "";
+        let pinner = "", ptitle = "", paria = "", pcls = "", pid = "";
         try { pinner = String(par.innerText || ""); } catch (_ePi) {}
-        if (!reloadRe.test(pinner) && !helpRe.test(pinner)) {
-          const pr = par.getBoundingClientRect();
-          if ((ptag === "button" || prole === "button" || ptag === "a") && pr.width <= 36 && pr.height <= 36) clickEl = par;
-        }
+        try {
+          ptitle = String((par.getAttribute && par.getAttribute("title")) || "");
+          paria = String((par.getAttribute && par.getAttribute("aria-label")) || "");
+          pcls = String(par.className && par.className.baseVal != null ? par.className.baseVal : par.className || "");
+          pid = String(par.id || "");
+        } catch (_ePm) {}
+        const pr = par.getBoundingClientRect();
+        const pcircle = pr && Math.abs(pr.width - pr.height) < 8;
+        const pnamed = infoRe.test(ptitle) || infoRe.test(paria) || infoRe.test(pcls) || infoRe.test(pid);
+        if (
+          (ptag === "button" || prole === "button" || ptag === "a") &&
+          pr && pr.width <= 36 && pr.height <= 36 && pcircle &&
+          !reloadRe.test(pinner) && !helpRe.test(pinner) && !ownLooksLikePair(pinner) &&
+          !CHEVRON_RE.test(ptitle + paria + pcls + pid + pinner) &&
+          !ASSET_LIST_OPENER_RE.test(pinner) && !ASSET_LIST_OPENER_RE.test(ptitle) && !ASSET_LIST_OPENER_RE.test(paria) &&
+          (pnamed || onPairInfoChip(par))
+        ) clickEl = par;
       }
     } catch (_eP) {}
     try { realishClick(clickEl); } catch (_eC) {}
@@ -1365,6 +1522,7 @@
     lastPnAt = 0;
     lastPairInfoClickAt = 0;
     lastPairInfoClickPair = "";
+    lastAssetListDismissAt = 0;
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
     try { if (axisObs) axisObs.disconnect(); } catch (_e2) {}
     if (reason) log(reason);
@@ -1505,6 +1663,7 @@
       const el = nodes[n];
       if (hud && (el === hud || hud.contains(el))) continue;
       if (dashEl && (el === dashEl || dashEl.contains(el))) continue;
+      if (inMarketList(el) || inAssetListOverlay(el)) continue;
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e) { continue; }
       if (!t || t.length > 48) continue;
@@ -1528,6 +1687,7 @@
       if (score > bestScore) { bestScore = score; best = lab; }
     }
     if (best) return best;
+    if (isAssetListOpen()) return lastSeenPair || null;
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
     if (fromSnap) return fromSnap;
