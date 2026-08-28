@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.51-ext)
+ * quotexbot Chrome MV3 content script (v0.9.52-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -8,7 +8,8 @@
  * HUD Up/Down must not start Auto (dashClickGuard + clearAutoArm).
  * Enter only in the first ~3s of a 1m candle (remaining 00:57–00:60, or a new HH:MM).
  * Mid-candle 00:08–00:56: log Wait candle open, do not click Up/Down. Last ~8s still skip.
- * Auto decides from stored bars — never 4s sampleOtc immediately before the open click.
+ * Auto decides from stored bars — never 4s sampleOtc / SWITCH TIME / MM sleeps in the open window.
+ * DEMO 0.9.50: fill 7s late (16-tick + SWITCH TIME + MM) and 22s late (mid-body). Click only 00:57–00:60.
  * Dashboard / mini / restore clicks return immediately and must not start Auto.
  * Start auto only from a trusted click on the same Start auto button that
  * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
@@ -575,7 +576,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.51-ext",
+    version: "0.9.52-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -4773,22 +4774,20 @@
         return { ok: false, error: "Wait candle open", waitCandle: true };
       }
     } catch (_eOp0) {}
+    let stillClock = false;
+    try { stillClock = timeIsClockMode(); } catch (_eClk0) { stillClock = false; }
+    if (stillClock) {
+      log("Time still clock, skip");
+      return { ok: false, error: "Time still clock, skip" };
+    }
     /* Take the lock BEFORE any await so a second Up/Down cannot sneak in.
-       Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block). */
+       Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block).
+       Do not SWITCH TIME or 16-tick sample here — that is why 0.9.50 filled ~7s late. */
     clickLock = true;
     clickLockAt = Date.now();
     try {
-      try { await ensureDurationMode(); } catch (_eDur) {}
-      let stillClock = false;
-      try { stillClock = timeIsClockMode(); } catch (_eClk) { stillClock = false; }
-      if (stillClock) {
-        clickLock = false;
-        clickLockAt = 0;
-        log("Time still clock, skip");
-        return { ok: false, error: "Time still clock, skip" };
-      }
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
-      if (snap.accountMode === "demo") {
+      if (snap.accountMode === "demo" && lastMmAppliedStake == null) {
         try { await applyMoneyManagement(); } catch (_eMm) {}
       }
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
@@ -4915,10 +4914,14 @@
 
       if (vis) onPairChange(p.label);
       state.lastPair = p.label;
-      state.lastSignal = "…";
-      state.lastReason = "Open chart: " + p.label;
-      log("Staying on this chart: " + p.label);
-      saveState(state); render();
+      let atOpen0 = false;
+      try { atOpen0 = atCandleOpenWindow(); } catch (_eAo) { atOpen0 = false; }
+      if (!atOpen0) {
+        state.lastSignal = "…";
+        state.lastReason = "Open chart: " + p.label;
+        log("Staying on this chart: " + p.label);
+        saveState(state); render();
+      }
 
       let lastPx = null;
       if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) lastPx = state.lastGoodPx;
@@ -4944,7 +4947,9 @@
         bars: barCount(p.label),
         ticks: 0,
       });
-      saveState(state); render(); renderDash();
+      if (!atOpen0) {
+        saveState(state); render(); renderDash();
+      }
 
       if (d.signal !== "CALL" && d.signal !== "PUT") {
         clearCandleOpenArm();
