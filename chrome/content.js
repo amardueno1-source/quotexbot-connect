@@ -1,8 +1,11 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.46-ext)
+ * quotexbot Chrome MV3 content script (v0.9.47-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
+ * Dashboard / mini / restore clicks return immediately and must not start Auto.
+ * Start auto only from a trusted click on the same Start auto button that
+ * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
  *
  * Live price: Price Now first (Pair Information panel quote, not only a node
  * whose own text is "Price Now"). Skip screenshot only when Price Now is live:
@@ -554,7 +557,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.46-ext",
+    version: "0.9.47-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -643,7 +646,11 @@
   let sessionAuto = false;
   let waitIgnoredLogged = false;
   let botSyntheticClick = false;
-  let autoPtrArmed = false;
+  let autoPtrArmedEl = null;
+  let autoPtrSeq = 0;
+  let hudPtrDown = false;
+  let hudRenderDeferred = false;
+  let dashClickGuardUntil = 0;
   let lastGoodPxAt = 0;
   let lastCaptureAt = 0;
   let captureBusy = false;
@@ -4776,8 +4783,14 @@
     el.id = "quotexbot-dash";
     (document.body || document.documentElement).appendChild(el);
     el.addEventListener("click", function (ev) {
-      const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
+      if (botSyntheticClick) return;
+      const t = ev.target;
+      if (!t || !t.closest) return;
+      if (!(t === el || (el.contains && el.contains(t)))) return;
+      const actEl = t.closest("[data-act]");
+      const act = actEl && actEl.getAttribute && actEl.getAttribute("data-act");
       if (act === "dash-close") {
+        dashClickGuardUntil = Date.now() + 1000;
         state.dashOpen = false;
         saveState(state);
         renderDash();
@@ -4828,8 +4841,34 @@
     mountGrip(dash, "dash");
   }
 
+  function patchHudLive() {
+    try {
+      if (!root || !root.querySelector) return;
+      const rows = root.querySelectorAll(".body > .row");
+      for (let i = 0; i < rows.length; i++) {
+        const span = rows[i].querySelector("span");
+        const b = rows[i].querySelector("b");
+        if (!span || !b) continue;
+        const k = String(span.textContent || "").trim();
+        if (k === "OTC price") b.textContent = state.lastPx || "—";
+        else if (k === "Auto") b.textContent = state.auto ? ("ON " + state.autoCount + "/" + MAX_AUTO) : "OFF";
+        else if (k === "Pair") {
+          let v = "";
+          try { v = visiblePair() || ""; } catch (_e) {}
+          b.textContent = v || state.lastPair || "—";
+        } else if (k === "Signal") b.textContent = state.lastSignal || "—";
+      }
+    } catch (_e0) {}
+  }
+
   function render() {
     if (topHudYielded) return;
+    if (hudPtrDown) {
+      hudRenderDeferred = true;
+      try { patchHudLive(); } catch (_eP) {}
+      return;
+    }
+    hudRenderDeferred = false;
     try { settlePendingJournal(); } catch (_eS) {}
     const snap = snapDoc();
     const demo = snap.accountMode === "demo";
@@ -4880,11 +4919,33 @@
 
   function onHudClick(ev) {
     if (botSyntheticClick) return;
-    const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const hudEl = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const inHud = !!(hudEl && (t === hudEl || (hudEl.contains && hudEl.contains(t))));
+    const inDash = !!(dashEl && (t === dashEl || (dashEl.contains && dashEl.contains(t))));
+    if (!inHud && !inDash) return;
+    const actEl = t.closest("[data-act]");
+    if (!actEl) return;
+    if (!(hudEl && hudEl.contains(actEl)) && !(dashEl && dashEl.contains(actEl))) return;
+    const act = actEl.getAttribute("data-act");
     if (!act) return;
-    if (act === "mini") { state.minimized = true; saveState(state); render(); }
-    if (act === "restore") { state.minimized = false; saveState(state); render(); }
-    if (act === "dash") { state.dashOpen = !state.dashOpen; saveState(state); renderDash(); }
+    if (act === "mini") {
+      dashClickGuardUntil = Date.now() + 1000;
+      state.minimized = true; saveState(state); render();
+      return;
+    }
+    if (act === "restore") {
+      dashClickGuardUntil = Date.now() + 1000;
+      state.minimized = false; saveState(state); render();
+      return;
+    }
+    if (act === "dash") {
+      dashClickGuardUntil = Date.now() + 1000;
+      state.dashOpen = !state.dashOpen; saveState(state); renderDash();
+      return;
+    }
     if (act === "up" || act === "down") {
       if (tradeBusy()) {
         const left = tradeWaitSec();
@@ -4928,24 +4989,34 @@
     if (act === "auto") {
       if (!ev || ev.isTrusted !== true) return;
       if (botSyntheticClick) return;
-      const autoBtn = ev.target && ev.target.closest && ev.target.closest('#quotexbot-hud button[data-act="auto"]');
+      const autoBtn = t.closest('#quotexbot-hud button[data-act="auto"]');
       if (!autoBtn) return;
       const btnText = String(autoBtn.textContent || autoBtn.innerText || "").replace(/\s+/g, " ").trim();
       const snap = snapDoc();
       if (state.auto || /^stop auto$/i.test(btnText)) {
         state.auto = false;
         sessionAuto = false;
+        autoPtrArmedEl = null;
         log("Auto off");
       } else if (snap.accountMode !== "demo") {
         state.lastReason = "Auto off on live account";
         log("Live, auto not started");
       } else {
         if (!/^start auto$/i.test(btnText)) return;
-        if (!autoPtrArmed) return;
+        if (Date.now() < dashClickGuardUntil) {
+          log("Auto blocked, dashboard click");
+          return;
+        }
+        const armTok = autoBtn.getAttribute("data-qarm");
+        if (!autoPtrArmedEl || autoPtrArmedEl !== autoBtn || !autoBtn.isConnected || String(armTok || "") !== String(autoPtrSeq)) {
+          log("Auto blocked, dashboard click");
+          return;
+        }
         /* state.auto = true ONLY here, from a real Start auto click. */
         state.auto = true;
         sessionAuto = true;
-        autoPtrArmed = false;
+        autoPtrArmedEl = null;
+        try { autoBtn.removeAttribute("data-qarm"); } catch (_eArm) {}
         state.autoCount = 0;
         state.lastReason = "Auto on · pair browse";
         log("Auto on — staying on this chart");
@@ -4955,14 +5026,67 @@
     }
   }
 
+  function clearAutoArm() {
+    if (autoPtrArmedEl && autoPtrArmedEl.removeAttribute) {
+      try { autoPtrArmedEl.removeAttribute("data-qarm"); } catch (_e) {}
+    }
+    autoPtrArmedEl = null;
+  }
+  function onGlobalPtrUp(ev) {
+    hudPtrDown = false;
+    const armed = autoPtrArmedEl;
+    if (armed && ev && ev.target) {
+      const rel = ev.target;
+      if (!(rel === armed || (armed.contains && armed.contains(rel)))) {
+        clearAutoArm();
+      }
+    }
+    setTimeout(function () {
+      if (autoPtrArmedEl === armed) clearAutoArm();
+      if (hudRenderDeferred && !hudPtrDown) {
+        hudRenderDeferred = false;
+        try { render(); } catch (_eR) {}
+      }
+    }, 0);
+  }
+  function onGlobalPtrCancel() {
+    hudPtrDown = false;
+    clearAutoArm();
+    if (hudRenderDeferred) {
+      hudRenderDeferred = false;
+      setTimeout(function () {
+        if (!hudPtrDown) {
+          try { render(); } catch (_eR) {}
+        }
+      }, 0);
+    }
+  }
+  if (!window.__quotexbotHudPtr) {
+    window.__quotexbotHudPtr = true;
+    document.addEventListener("pointerup", onGlobalPtrUp, true);
+    document.addEventListener("pointercancel", onGlobalPtrCancel, true);
+  }
+
   function bindHud(el) {
     el.addEventListener("pointerdown", function (ev) {
-      autoPtrArmed = false;
+      clearAutoArm();
       if (botSyntheticClick) return;
       if (!ev || ev.isTrusted !== true) return;
-      const btn = ev.target && ev.target.closest && ev.target.closest('#quotexbot-hud button[data-act="auto"]');
+      const t = ev.target;
+      if (!t || !el.contains(t)) return;
+      hudPtrDown = true;
+      const actEl = t.closest && t.closest("[data-act]");
+      const act = actEl && actEl.getAttribute && actEl.getAttribute("data-act");
+      if (act === "dash" || act === "mini" || act === "restore") {
+        dashClickGuardUntil = Date.now() + 1000;
+        return;
+      }
+      if (act && act !== "auto") return;
+      const btn = t.closest && t.closest('#quotexbot-hud button[data-act="auto"]');
       if (!btn) return;
-      autoPtrArmed = true;
+      autoPtrSeq += 1;
+      try { btn.setAttribute("data-qarm", String(autoPtrSeq)); } catch (_eTok) {}
+      autoPtrArmedEl = btn;
     }, true);
     el.addEventListener("click", onHudClick);
     el.addEventListener("mousedown", function (ev) { startWin(el, "hud", ev); });

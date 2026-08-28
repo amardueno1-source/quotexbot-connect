@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.46
+quotexbot Chrome MV3 extension  v0.9.47
 =======================================
 
 Load unpacked
@@ -15,6 +15,7 @@ The HUD is English. Pair names, CALL/PUT, and DEMO stay as-is.
 DEMO only. Visible DOM. No cookies / SSID / unofficial APIs.
 Stay on the open chart. Auto clicks Up/Down on DEMO only.
 Auto ON only from a trusted Start auto click this session.
+Dashboard / mini / restore clicks must not start Auto.
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
 only when that quote is live (finite v that changed, or last change < 2.5s).
