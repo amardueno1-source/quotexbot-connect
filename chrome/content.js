@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.49-ext)
+ * quotexbot Chrome MV3 content script (v0.9.50-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -12,6 +12,8 @@
  * order ticket as an open trade. While a REAL open trade exists, skip a second
  * Up/Down in both directions. clickLock auto-clears after 3s if Trades is still 0.
  * Pending journal (ok, no result) is not an open trade after Trades=0.
+ * Auto skips until 21 dense bars; no 2-tick CALL. USD/BRL 0.14–0.32.
+ * Price Now must pass ok() even when lastGoodPx is null (no first-tick bypass).
  * dirBlockedByOpenTrade and skip-second-click use only realTradeOpenNow()
  * (badge ≥ 1 OR this-session reserved OR real $ + dir + MM:SS row).
  * When Trades=0 and not reserved: clickLock=false; settle or mark missed
@@ -567,7 +569,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.49-ext",
+    version: "0.9.50-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -606,7 +608,7 @@
       "USD/CAD": [1.2, 1.55],
       "USD/PHP": [40, 80],
       "USD/COP": [2000, 5000],
-      "USD/BRL": [0.12, 9],
+      "USD/BRL": [0.14, 0.32],
       "USD/DZD": [80, 400],
       "NZD/CAD": [0.75, 1.05],
       "NZD/USD": [0.50, 0.62],
@@ -2165,11 +2167,13 @@
       }
       if (tenthsAmbiguous) {
         if (lastGood != null && isFinite(lastGood)) return nearest(lastGood);
-        return nearest((range.lo + range.hi) / 2);
+        /* No lastGood: do not invent a tenths guess from range mid (first-tick garbage). */
+        if (inRange(v)) return v;
+        return v;
       }
       if (lastGood != null && isFinite(lastGood)) return nearest(lastGood);
       if (inRange(v)) return v;
-      for (let i = 1; i < tries.length; i++) if (inRange(tries[i])) return tries[i];
+      /* Out of range with no lastGood: leave as-is so ok()/range reject it (0.41994 vs USD/BRL). */
       return v;
     }
     function ok(v, info) {
@@ -2184,11 +2188,9 @@
         if (info.decimals != null) dec = info.decimals;
       }
       if (dec == null) dec = quoteDecimals(v, text);
-      /* FX like NZD/USD is 5 dp (0.58105). 1.13515 (5 dp) must pass. 0.609 is 3 dp OCR garbage. */
-      if (v < 2 && dec < 4) {
-        if (state.lastGoodPx != null) return false;
-        /* first tick already in CONFIG.ranges (lo/hi checked) — do not reject */
-      }
+      /* FX like NZD/USD is 5 dp (0.58105). 1.13515 (5 dp) must pass. 0.609 is 3 dp OCR garbage.
+         First tick (lastGoodPx == null) must also have dec>=4 when v<2. */
+      if (v < 2 && dec < 4) return false;
       /* USD/DZD ~245 and JPY/PKR/BDT/ARS: 2–3 dp on 80–400 (3 integer digits) is real, not OCR junk. */
       const midOtc = v >= 80 && v <= 400 && dec >= 2 && dec <= 3;
       if (midOtc && v >= range.lo && v <= range.hi) {
@@ -2199,13 +2201,8 @@
       if (state.lastGoodPx != null) {
         const abs = Math.abs(v - state.lastGoodPx);
         const rel = abs / Math.max(Math.abs(state.lastGoodPx), 1e-6);
-        /* 1%: 0.609 vs 0.581 is ~4.8%. First reading still allowed. Live ticks ~0.02%. */
-        if (rel > 0.01) {
-          const tenths = abs > 0.08 && abs < 0.12;
-          const bothIn = v >= range.lo && v <= range.hi && state.lastGoodPx >= range.lo && state.lastGoodPx <= range.hi;
-          if (midOtc && bothIn && rel <= 0.05) { /* 3-int-digit OTC: allow a few points of OCR noise */ }
-          else if (!(tenths && bothIn)) return false;
-        }
+        /* Never accept a >1% jump vs lastGoodPx (no tenths exception: 0.20→0.42 must fail). */
+        if (rel > 0.01) return false;
       }
       return true;
     }
@@ -2243,7 +2240,7 @@
       /* Frozen Price Now (same v >7s): do not return it; OCR the cyan tag. */
       if (isFrozenQuote(pn.v)) {
         /* fall through to canvas OCR / readLiveTagByHit */
-      } else if (ok(pn.v, pn) || state.lastGoodPx == null) {
+      } else if (ok(pn.v, pn)) {
         notePriceNowV(pn.v);
         return acceptLivePx(pn.v);
       }
@@ -2282,6 +2279,29 @@
     return { n: all.length, nIn: nIn, shown: shown };
   }
 
+  function filterGarbageTicks(ticks) {
+    if (!ticks || !ticks.length) return [];
+    const xs = [];
+    for (let i = 0; i < ticks.length; i++) {
+      const px = ticks[i];
+      if (px == null || !isFinite(px)) continue;
+      xs.push(px);
+    }
+    if (!xs.length) return [];
+    let ref;
+    if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) ref = state.lastGoodPx;
+    else {
+      const sorted = xs.slice().sort(function (a, b) { return a - b; });
+      ref = sorted[Math.floor(sorted.length / 2)];
+    }
+    const out = [];
+    for (let i = 0; i < xs.length; i++) {
+      const rel = Math.abs(xs[i] - ref) / Math.max(Math.abs(ref), 1e-6);
+      if (rel <= 0.008) out.push(xs[i]);
+    }
+    return out;
+  }
+
   async function sampleOtc(label) {
     const ticks = [];
     for (let i = 0; i < CONFIG.sampleTicks; i++) {
@@ -2289,10 +2309,11 @@
       if (px != null) ticks.push(px);
       await sleep(CONFIG.sampleMs);
     }
-    return ticks;
+    return filterGarbageTicks(ticks);
   }
 
   function ingestTicks(label, ticks) {
+    ticks = filterGarbageTicks(ticks);
     if (!label || label === "—") return [];
     if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
     if (!Array.isArray(state.otcBars[label])) state.otcBars[label] = [];
@@ -4628,7 +4649,7 @@
 
       log("Reading OTC chart price: " + p.label);
       const ticks = await sampleOtc(p.label);
-      const bars = ingestTicks(p.label, ticks);
+      ingestTicks(p.label, ticks);
       const lastPx = ticks.length ? ticks[ticks.length - 1] : null;
       if (lastPx != null) {
         state.lastPx = fmtPx(lastPx, p.label);
@@ -4646,16 +4667,9 @@
       if (hist.length >= CONFIG.minBarsForEma) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
         d = { signal: raw.signal, reason: "saved history " + hist.length + " bars · " + raw.reason };
-      } else if (ticks.length >= CONFIG.minTicks) {
-        const live = decideTicks(ticks);
-        d = { signal: live.signal, reason: live.reason + " · stored " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
-      } else if (bars.length >= 2) {
-        const a = bars[bars.length - 2], b = bars[bars.length - 1];
-        if (b.close > a.close) d = { signal: "CALL", reason: "saved bars up · stored " + bars.length };
-        else if (b.close < a.close) d = { signal: "PUT", reason: "saved bars down · stored " + bars.length };
-        else d = { signal: "SKIP", reason: "saved bars flat · stored " + bars.length };
       } else {
-        d = { signal: "SKIP", reason: "no OTC price · stored " + barCount(p.label) + "/" + CONFIG.minBarsForEma };
+        d = { signal: "SKIP", reason: "Need " + CONFIG.minBarsForEma + " bars, stored " + hist.length };
+        log("Need " + CONFIG.minBarsForEma + " bars, stored " + hist.length);
       }
 
       state.lastSignal = d.signal;

@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.49-ext
+quotexbot Chrome MV3 extension  v0.9.50-ext
 =======================================
 
 Load unpacked
@@ -21,6 +21,8 @@ reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
 Never treat the Time widget + Investment field as an open trade.
 Pending journal is not an open trade after Trades=0. Auto takes the next
 signal once the last trade expires (small 2–3s gap OK).
+Auto skips until 21 dense bars (no 2-tick CALL). USD/BRL 0.14–0.32.
+Price Now must pass ok() on the first tick (no lastGoodPx-null bypass).
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
 only when that quote is live (finite v that changed, or last change < 2.5s).
