@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.53-ext
+quotexbot Chrome MV3 extension  v0.9.54-ext
 =======================================
 
 Load unpacked
@@ -17,14 +17,23 @@ Stay on the open chart. Auto clicks Up/Down on DEMO only.
 Auto ON only from a trusted Start auto click this session.
 Dashboard / mini / restore clicks must not start Auto.
 HUD Up / Dashboard must not start Auto.
-Switch Time with realishClick (not el.click()) on idle. Candle open is wall-clock
-seconds 0-4, not Time leftover 00:51. Clock HH:MM at open still allows the click.
+SWITCH TIME / Time chip at most once per page boot (or once on Start auto).
+If Time stays clock, give up and never click SWITCH TIME again this session
+(log: Time left on clock). Idle does not retry every 8s. Candle-open click
+never opens SWITCH TIME. If a duration dropdown is open: Escape once, then stop.
+Candle open is wall-clock seconds 0-4, not Time leftover 00:51. Clock HH:MM at
+open still allows the click.
 Mid-candle seconds 5-51 logs Wait candle open and does not click Up/Down.
 One open trade at a time. Skip Up/Down only if Trades badge ≥ 1, this-session
 reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
 Never treat the Time widget + Investment field as an open trade.
 Pending journal is not an open trade after Trades=0. Auto takes the next
 signal once the last trade expires (small 2–3s gap OK).
+Auto NEVER clicks if denseBars < 21 (hard gate on the Up/Down click).
+Stay on the already-open chart. Never click another pair tab/row.
+If (i) opens the asset list or changes the pair: close it and ban further (i).
+Up/Down scrape click only when getSeconds()<=4 (fail closed). No Time/SWITCH
+TIME inside clickDir. No 8s idle SWITCH TIME retry.
 Auto skips until 21 dense bars (no 2-tick CALL). USD/BRL 0.14–0.32.
 Price Now must pass ok() on the first tick (no lastGoodPx-null bypass).
 

@@ -1,10 +1,16 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.53-ext)
+ * quotexbot Chrome MV3 content script (v0.9.54-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
- * DEMO-only Up/Down clicks. Stay on the open chart.
- * Switch Time with realishClick (pointerdown/up), not el.click(). SWITCH TIME
- * on idle; never block a candle-open click because Time is still clock HH:MM.
+ * Stay on the open chart.
+ * SWITCH TIME / duration chip / setControlValue Time: at most once per page
+ * boot (or once when Start auto is clicked). If still clock after that one
+ * try, timeSwitchGaveUp = true and never click Time/SWITCH TIME again this
+ * session. Log once: Time left on clock. maybeEnsureDurationIdle does not
+ * 8s-retry. clickDir / candle-open never calls ensureDurationMode.
+ * If a duration dropdown is open: Escape once, then stop.
+ * Switch Time with realishClick (pointerdown/up), not el.click(). Never block
+ * a candle-open click because Time is still clock HH:MM.
  * HUD Up/Down must not start Auto (dashClickGuard + clearAutoArm).
  * Candle open = wall-clock seconds 0-4 (new Date().getSeconds() <= 4). Do not
  * treat Time widget HH:MM or a ~00:51 clock-expiry leftover as candle remain.
@@ -20,6 +26,11 @@
  * order ticket as an open trade. While a REAL open trade exists, skip a second
  * Up/Down in both directions. clickLock auto-clears after 3s if Trades is still 0.
  * Pending journal (ok, no result) is not an open trade after Trades=0.
+ * Auto NEVER clicks if denseBars < 21 (hard gate in clickDir, not only HUD SKIP).
+ * Stay on the already-open chart. NEVER click another pair tab/row. Pin pair at
+ * boot / Start auto. If (i) opens the asset list or changes the pair: close it
+ * and ban further (i) for the session (do not un-ban on pair change).
+ * scrape.click Up/Down only if getSeconds()<=4 at the click (fail closed).
  * Auto skips until 21 dense bars; no 2-tick CALL. USD/BRL 0.14–0.32.
  * Price Now must pass ok() even when lastGoodPx is null (no first-tick bypass).
  * dirBlockedByOpenTrade and skip-second-click use only realTradeOpenNow()
@@ -515,8 +526,15 @@
       if (el) setControlValue(el, opts.stake);
     }
     if (opts.duration) {
-      const el = findLabeledInput(doc, TIME_LABELS);
-      if (el) setControlValue(el, opts.duration);
+      if (root.__quotexbotTimeSwitchGaveUp || root.__quotexbotTimeWriteDone) {
+        /* 0.9.54: Time setControlValue at most once per boot */
+      } else {
+        const el = findLabeledInput(doc, TIME_LABELS);
+        if (el) {
+          root.__quotexbotTimeWriteDone = true;
+          setControlValue(el, opts.duration);
+        }
+      }
     }
   }
 
@@ -577,7 +595,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.53-ext",
+    version: "0.9.54-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -780,7 +798,11 @@
   let pendingLockClearedLogged = false;
   let staleBusyCleared = false;
   let durationEnsuredOnce = false;
-  let lastDurationEnsureAt = 0;
+  let timeSwitchGaveUp = false;
+  let durationAttemptedThisBoot = false;
+  let timeLeftOnClockLogged = false;
+  let timeDropdownDismissedOnce = false;
+  let sessionChartPair = "";
   let lastWaitCandleLogAt = 0;
   let candleOpenTimer = 0;
   let pendingCandleDir = "";
@@ -1888,6 +1910,22 @@
     return el;
   }
 
+  function inPairListRow(el) {
+    if (!el) return false;
+    if (inMarketList(el) || inAssetListOverlay(el)) return true;
+    let n = el;
+    for (let i = 0; i < 8 && n && n !== document.body; i++) {
+      let t = "";
+      try { t = String(n.innerText || "").replace(/\s+/g, " ").trim(); } catch (_eT) { t = ""; }
+      let r = null;
+      try { r = n.getBoundingClientRect(); } catch (_eR) {}
+      const pairs = t ? t.match(/\b[A-Z]{3}\s*\/\s*[A-Z]{3}\b/gi) : null;
+      if (pairs && pairs.length >= 2 && r && r.height >= 80) return true;
+      if (pairs && pairs.length === 1 && r && r.height <= 52 && r.width >= 80 && r.width <= 320) return true;
+      n = n.parentElement;
+    }
+    return false;
+  }
   function collectPairInfoIcons() {
     const found = [];
     const seen = [];
@@ -1896,11 +1934,11 @@
       if (seen.indexOf(svg) >= 0) return;
       seen.push(svg);
       if (skipHudDashEl(svg)) return;
-      if (inMarketList(svg) || inAssetListOverlay(svg)) return;
+      if (inMarketList(svg) || inAssetListOverlay(svg) || inPairListRow(svg)) return;
       const clickEl = clickablePairInfoParent(svg);
       if (!clickEl) return;
       if (isPairInfoHeadingEl(clickEl) || isPairInfoHeadingEl(svg)) return;
-      if (skipHudDashEl(clickEl) || inMarketList(clickEl) || inAssetListOverlay(clickEl)) return;
+      if (skipHudDashEl(clickEl) || inMarketList(clickEl) || inAssetListOverlay(clickEl) || inPairListRow(clickEl)) return;
       let own = "";
       try { own = String(clickEl.textContent || "").replace(/\s+/g, " ").trim(); } catch (_eT) {}
       if (/^pair\s*information$/i.test(own)) return;
@@ -1999,6 +2037,7 @@
 
   function ensurePairInfoOpen() {
     if (topHudYielded) return false;
+    try { if (atCandleOpenWindow()) return false; } catch (_eOpen) {}
     if (pairInfoPopupOpen()) return true;
     try {
       const pn = readPriceNow();
@@ -2007,12 +2046,14 @@
     if (pairInfoClickBanned) return false;
     if (isAssetListOpen()) {
       try { dismissAssetList(); } catch (_eD0) {}
+      pairInfoClickBanned = true;
       return false;
     }
     const now = Date.now();
     if (lastPairInfoClickAt && now - lastPairInfoClickAt < 8000) return false;
     const icon = findPairInfoIcon();
     if (!icon || !icon.el) return false;
+    try { if (inPairListRow(icon.el) || inMarketList(icon.el) || inAssetListOverlay(icon.el)) return false; } catch (_eRow) { return false; }
     try { moveHudOffPair(null, icon.r); } catch (_eH) {}
     try {
       if (isBotChrome(icon.el)) return false;
@@ -2026,22 +2067,28 @@
       }
     } catch (_eSkip) { return false; }
     lastPairInfoClickAt = now;
-    lastPairInfoClickPair = visiblePair() || lastSeenPair || "";
+    lastPairInfoClickPair = visiblePair() || lastSeenPair || sessionChartPair || "";
+    const visBefore = lastPairInfoClickPair;
     try { realishClick(icon.el); } catch (_eC) {}
-    setTimeout(function () {
+    function afterInfoClick() {
       try {
-        if (pairInfoPopupOpen()) return;
-        try {
-          const pn2 = readPriceNow();
-          if (pn2 && pn2.v != null) return;
-        } catch (_ePn2) {}
         if (isAssetListOpen()) {
           dismissAssetList();
           pairInfoClickBanned = true;
           lastAssetListDismissAt = Date.now();
+          return;
+        }
+        let visAfter = "";
+        try { visAfter = visiblePair() || ""; } catch (_eV) { visAfter = ""; }
+        if (visBefore && visAfter && fxPairKey(visAfter) !== fxPairKey(visBefore)) {
+          pairInfoClickBanned = true;
+          log("Pair tab click banned");
         }
       } catch (_eA) {}
-    }, 400);
+    }
+    try { afterInfoClick(); } catch (_e0) {}
+    setTimeout(afterInfoClick, 200);
+    setTimeout(afterInfoClick, 500);
     return false;
   }
 
@@ -2101,7 +2148,7 @@
     lastPairInfoClickAt = 0;
     lastPairInfoClickPair = "";
     lastAssetListDismissAt = 0;
-    pairInfoClickBanned = false;
+    /* 0.9.54: keep pairInfoClickBanned for the session even if the chart hops. */
     lastCanvasOcr = { v: null, at: 0 };
     lastCanvasCd = { sec: null, at: 0, text: "", money: false };
     try { Object.keys(quoteSeen).forEach(function (k) { delete quoteSeen[k]; }); } catch (_e) {}
@@ -2774,55 +2821,13 @@
   }
 
   function clickCurrentAssetHeader() {
-    const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, span, div"));
-    let best = null, bestLen = 1e9;
-    for (const el of nodes) {
-      if (!canClickPlatform(el)) continue;
-      const t = (el.innerText || "").replace(/\s+/g, " ").trim();
-      if (!t || t.length > 28) continue;
-      if (!/^[A-Z]{3}\s*\/\s*[A-Z]{3}/i.test(t) && !/\(\s*OTC\s*\)/i.test(t)) continue;
-      if (t.length < bestLen) { best = el; bestLen = t.length; }
-    }
-    if (best && platformClick(best)) {
-      return true;
-    }
+    /* 0.9.54: never click a pair tab/header. Stay on the already-open chart. */
     return false;
   }
 
   async function openAsset(label) {
-    const compact = label.replace("/", "").toUpperCase();
-    const already = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
-    if (already.includes(compact)) return true;
-
-    let chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && canClickPlatform(chip) && typeof chip.click === "function") {
-      platformClick(chip);
-      await sleep(400);
-      const item = clickableByText(label);
-      if (item && item !== chip && canClickPlatform(item)) platformClick(item);
-      await sleep(700);
-      const now = (snapDoc().asset || "").replace(/\s+/g, "").toUpperCase();
-      if (now.includes(compact)) return true;
-    }
-
-    clickCurrentAssetHeader();
-    await sleep(500);
-    let box = findSearchBox();
-    if (!box) {
-      clickCurrentAssetHeader();
-      await sleep(400);
-      box = findSearchBox();
-    }
-    if (box) {
-      typeIn(box, label);
-      await sleep(700);
-    }
-    chip = clickableByText(label) || clickableByText(label + " (OTC)") || clickableByText(label.replace("/", ""));
-    if (chip && canClickPlatform(chip) && platformClick(chip)) {
-      await sleep(800);
-      return true;
-    }
-    return false;
+    /* 0.9.54: never click another pair tab/row. Stay on the already-open chart. */
+    return true;
   }
 
   let lastTradesFp = "";
@@ -3132,6 +3137,7 @@
   }
   async function maybeApplyMmIdle() {
     if (mmIdleBusy) return;
+    try { if (atCandleOpenWindow()) return; } catch (_eOpen) {}
     let demo = false;
     try { demo = snapDoc().accountMode === "demo"; } catch (_e0) { return; }
     if (!demo) return;
@@ -4177,6 +4183,75 @@
       try { window.dispatchEvent(new KeyboardEvent("keyup", opts)); } catch (_eW2) {}
     } catch (_e0) {}
   }
+  function logTimeLeftOnClockOnce() {
+    if (timeLeftOnClockLogged) return;
+    timeLeftOnClockLogged = true;
+    log("Time left on clock");
+  }
+  function giveUpTimeSwitch() {
+    timeSwitchGaveUp = true;
+    durationAttemptedThisBoot = true;
+    try { globalThis.__quotexbotTimeSwitchGaveUp = true; } catch (_eG) {}
+    logTimeLeftOnClockOnce();
+  }
+  function dismissDurationDropdownOnce() {
+    if (timeDropdownDismissedOnce) return false;
+    timeDropdownDismissedOnce = true;
+    try { dismissTimeDropdown(); } catch (_e) {}
+    return true;
+  }
+  function durationDropdownOpen() {
+    const durRe = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
+    const expiryHint = /^(5s|10s|15s|30s|2m|3m)$/i;
+    const seenRight = {};
+    let hint = 0;
+    let inMenu = false;
+    const wide = window.innerWidth || 1200;
+    try {
+      forEachRoot(function (rootEl) {
+        try {
+          const menus = rootEl.querySelectorAll('[role="listbox"], [role="menu"], [role="dialog"]');
+          for (let i = 0; i < menus.length; i++) {
+            let n = 0;
+            const kids = menus[i].querySelectorAll("button, [role='option'], [role='menuitem'], li, span, div, b, a");
+            for (let j = 0; j < kids.length; j++) {
+              const t = widgetText(kids[j]).replace(/\s+/g, "");
+              if (durRe.test(t)) n += 1;
+            }
+            if (n >= 3) inMenu = true;
+          }
+        } catch (_eM) {}
+        try {
+          const list = rootEl.querySelectorAll("button, [role='button'], [role='option'], li, span, div, b, a");
+          for (let i = 0; i < list.length; i++) {
+            const el = list[i];
+            const t = widgetText(el).replace(/\s+/g, "");
+            if (!durRe.test(t)) continue;
+            let r;
+            try { r = el.getBoundingClientRect(); } catch (_eR) { continue; }
+            if (!r || r.width < 4 || r.height < 4 || r.left < wide * 0.45) continue;
+            seenRight[t.toLowerCase()] = true;
+            if (expiryHint.test(t)) hint += 1;
+          }
+        } catch (_eL) {}
+      });
+    } catch (_e0) {}
+    return inMenu || hint >= 3 || Object.keys(seenRight).length >= 6;
+  }
+  function writeTimeControlOnce(value) {
+    if (timeSwitchGaveUp || durationEnsuredOnce) return false;
+    try { if (globalThis.__quotexbotTimeWriteDone) return false; } catch (_eF) {}
+    try {
+      if (scrape && typeof scrape.findLabeledInput === "function" && typeof scrape.setControlValue === "function") {
+        const el = scrape.findLabeledInput(document, TIME_LABELS);
+        if (!el) return false;
+        try { globalThis.__quotexbotTimeWriteDone = true; } catch (_eW) {}
+        scrape.setControlValue(el, value);
+        return true;
+      }
+    } catch (_e1) {}
+    return false;
+  }
   function isSwitchTimeText(t) {
     const s = String(t || "").replace(/\s+/g, " ").trim();
     if (!s) return false;
@@ -4188,6 +4263,8 @@
     return false;
   }
   function clickSwitchTime() {
+    if (timeSwitchGaveUp || durationEnsuredOnce) return false;
+    durationAttemptedThisBoot = true;
     const nodes = [];
     try {
       forEachRoot(function (root) {
@@ -4222,6 +4299,8 @@
     return true;
   }
   function clickDurationChip(want) {
+    if (timeSwitchGaveUp) return false;
+    durationAttemptedThisBoot = true;
     const need = String(want || "1m").toLowerCase();
     const re = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
     const nodes = [];
@@ -4294,41 +4373,59 @@
     return best;
   }
   async function ensureDurationMode() {
+    if (durationEnsuredOnce) return true;
+    if (timeSwitchGaveUp) return false;
     let raw = "";
     try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR) { raw = ""; }
     if (timeLooksDuration(raw)) {
       durationEnsuredOnce = true;
       return true;
     }
+    if (durationAttemptedThisBoot) return false;
+    try {
+      if (durationDropdownOpen()) {
+        durationAttemptedThisBoot = true;
+        dismissDurationDropdownOnce();
+        await sleep(200);
+        try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR0) { raw = ""; }
+        if (timeLooksDuration(raw)) {
+          durationEnsuredOnce = true;
+          return true;
+        }
+        giveUpTimeSwitch();
+        return false;
+      }
+    } catch (_eDd) {}
     let clock = false;
     try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
     if (!clock) return false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try { clickSwitchTime(); } catch (_eSw) {}
-      await sleep(400);
-      try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR2) { raw = ""; }
-      if (timeLooksDuration(raw)) {
-        durationEnsuredOnce = true;
-        log("Time set to 1m");
-        try { dismissTimeDropdown(); } catch (_eD0) {}
-        return true;
-      }
-      try {
-        const clockEl = findTimeWidgetClockEl();
-        if (clockEl) realishClickPlatform(clockEl);
-      } catch (_eClk) {}
-      await sleep(300);
-      try { clickDurationChip("1m"); } catch (_eCh) {}
-      await sleep(300);
-      try { dismissTimeDropdown(); } catch (_eD) {}
-      try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR3) { raw = ""; }
-      if (timeLooksDuration(raw)) {
-        durationEnsuredOnce = true;
-        log("Time set to 1m");
-        return true;
-      }
+    durationAttemptedThisBoot = true;
+    /* One SWITCH TIME / chip / setControlValue try per boot. No 3-attempt loop. */
+    try { clickSwitchTime(); } catch (_eSw) {}
+    await sleep(400);
+    try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR2) { raw = ""; }
+    if (timeLooksDuration(raw)) {
+      durationEnsuredOnce = true;
+      log("Time set to 1m");
+      dismissDurationDropdownOnce();
+      return true;
     }
-    log("Time still clock, skip");
+    try {
+      const clockEl = findTimeWidgetClockEl();
+      if (clockEl) realishClickPlatform(clockEl);
+    } catch (_eClk) {}
+    await sleep(300);
+    try { clickDurationChip("1m"); } catch (_eCh) {}
+    try { writeTimeControlOnce("1m"); } catch (_eSv) {}
+    await sleep(300);
+    dismissDurationDropdownOnce();
+    try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR3) { raw = ""; }
+    if (timeLooksDuration(raw)) {
+      durationEnsuredOnce = true;
+      log("Time set to 1m");
+      return true;
+    }
+    giveUpTimeSwitch();
     return false;
   }
   function platformHasOpenTrade() {
@@ -4624,7 +4721,7 @@
     log("Boot: no open trade on platform, stale cooldown cleared");
   }
   async function maybeEnsureDurationIdle() {
-    if (durationEnsuredOnce) return;
+    if (durationEnsuredOnce || timeSwitchGaveUp || durationAttemptedThisBoot) return;
     if (realTradeOpenNow()) return;
     try { if (atCandleOpenWindow()) return; } catch (_eOpen) {}
     let raw = "";
@@ -4633,12 +4730,23 @@
       durationEnsuredOnce = true;
       return;
     }
+    try {
+      if (durationDropdownOpen()) {
+        durationAttemptedThisBoot = true;
+        dismissDurationDropdownOnce();
+        try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR2) { raw = ""; }
+        if (timeLooksDuration(raw)) durationEnsuredOnce = true;
+        else {
+          let clockDrop = false;
+          try { clockDrop = timeIsClockMode(); } catch (_eC) { clockDrop = false; }
+          if (clockDrop) giveUpTimeSwitch();
+        }
+        return;
+      }
+    } catch (_eDd) {}
     let clock = false;
     try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
     if (!clock) return;
-    const now = Date.now();
-    if (lastDurationEnsureAt && (now - lastDurationEnsureAt) < 8000) return;
-    lastDurationEnsureAt = now;
     try { await ensureDurationMode(); } catch (_e2) {}
   }
   function clearCandleOpenArm() {
@@ -4756,19 +4864,34 @@
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     if (realTradeOpenNow() || tradeBusy()) return tradeOpenError();
     try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
-    try {
-      if (!atCandleOpenWindow()) {
-        const nowW = Date.now();
-        if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
-          lastWaitCandleLogAt = nowW;
-          log("Wait candle open");
-        }
-        return { ok: false, error: "Wait candle open", waitCandle: true };
+    let atOpenGate = false;
+    try { atOpenGate = atCandleOpenWindow(); } catch (_eOp0) { atOpenGate = false; }
+    if (!atOpenGate) {
+      const nowW = Date.now();
+      if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
+        lastWaitCandleLogAt = nowW;
+        log("Wait candle open");
       }
-    } catch (_eOp0) {}
+      return { ok: false, error: "Wait candle open", waitCandle: true };
+    }
     try { if (candleTooClose()) { return tradeOpenError(); } } catch (_eCd) {}
+    if (sessionAuto && state.auto) {
+      let labClick = "";
+      try { labClick = visiblePair() || ""; } catch (_eV0) { labClick = ""; }
+      if (!labClick) return { ok: false, error: "Chart pair not detected, will not switch" };
+      if (sessionChartPair && fxPairKey(labClick) !== fxPairKey(sessionChartPair)) {
+        log("Staying on this chart: " + sessionChartPair);
+        return { ok: false, error: "Staying on this chart" };
+      }
+      const nBars = denseBars(labClick).length;
+      if (nBars < CONFIG.minBarsForEma) {
+        log("Need " + CONFIG.minBarsForEma + " bars, stored " + nBars);
+        return { ok: false, error: "Need " + CONFIG.minBarsForEma + " bars, stored " + nBars };
+      }
+    }
     /* Clock at seconds 0-4 expires at the next HH:MM ≈ 1m. Allow the open
-       click even if Time is still clock. SWITCH TIME stays idle-only. */
+       click even if Time is still clock. Never call ensureDurationMode here —
+       SWITCH TIME at :00 makes the fill late. Idle-only, once per boot. */
     let stillClock = false;
     try { stillClock = timeIsClockMode(); } catch (_eClk0) { stillClock = false; }
     if (stillClock) {
@@ -4786,23 +4909,21 @@
     clickLockAt = Date.now();
     try {
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
-      if (snap.accountMode === "demo" && lastMmAppliedStake == null) {
-        try { await applyMoneyManagement(); } catch (_eMm) {}
-      }
+      /* MM is idle-only. Do not sleep in the open window. */
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
-      try {
-        if (!atCandleOpenWindow()) {
-          clickLock = false;
-          clickLockAt = 0;
-          lastClickAt = 0;
-          const nowW2 = Date.now();
-          if (!lastWaitCandleLogAt || nowW2 - lastWaitCandleLogAt > 8000) {
-            lastWaitCandleLogAt = nowW2;
-            log("Wait candle open");
-          }
-          return { ok: false, error: "Wait candle open", waitCandle: true };
+      let atOpen2 = false;
+      try { atOpen2 = atCandleOpenWindow(); } catch (_eOp1) { atOpen2 = false; }
+      if (!atOpen2) {
+        clickLock = false;
+        clickLockAt = 0;
+        lastClickAt = 0;
+        const nowW2 = Date.now();
+        if (!lastWaitCandleLogAt || nowW2 - lastWaitCandleLogAt > 8000) {
+          lastWaitCandleLogAt = nowW2;
+          log("Wait candle open");
         }
-      } catch (_eOp1) {}
+        return { ok: false, error: "Wait candle open", waitCandle: true };
+      }
       try {
         if (expiryTooClose() || candleTooClose()) {
           clickLock = false;
@@ -4817,6 +4938,26 @@
       try { fpBefore = tradesFingerprint(); } catch (_fpB) { fpBefore = ""; }
       const balBefore = lastPreClickBal;
       const opts = lastMmAppliedStake != null ? { stake: String(lastMmAppliedStake) } : {};
+      let atOpenClick = false;
+      try { atOpenClick = atCandleOpenWindow(); } catch (_eOp2) { atOpenClick = false; }
+      if (!atOpenClick) {
+        clickLock = false;
+        clickLockAt = 0;
+        lastClickAt = 0;
+        return { ok: false, error: "Wait candle open", waitCandle: true };
+      }
+      if (sessionAuto && state.auto) {
+        let lab2 = "";
+        try { lab2 = visiblePair() || ""; } catch (_eV2) { lab2 = ""; }
+        const n2 = denseBars(lab2).length;
+        if (!lab2 || n2 < CONFIG.minBarsForEma) {
+          clickLock = false;
+          clickLockAt = 0;
+          lastClickAt = 0;
+          log("Need " + CONFIG.minBarsForEma + " bars, stored " + n2);
+          return { ok: false, error: "Need " + CONFIG.minBarsForEma + " bars, stored " + n2 };
+        }
+      }
       const r = dir === "down" ? scrape.clickDown(document, opts) : scrape.clickUp(document, opts);
       lastClickAt = Date.now();
       if (!r || !r.ok) {
@@ -4905,17 +5046,21 @@
       } catch (_eEx0) {}
 
       const vis = visiblePair();
-      const fallback = (state.lastPair && state.lastPair !== "—") ? state.lastPair : null;
-      const p = (vis || fallback) ? { label: vis || fallback } : null;
-      if (!p) {
+      if (!vis) {
         log("Chart pair not detected, will not switch");
         state.lastReason = "Keep this pair open, switch off";
         saveState(state); render();
         return;
       }
-      if (!vis && fallback) log("Pair tab unstable, holding open chart: " + fallback);
-
-      if (vis) onPairChange(p.label);
+      if (!sessionChartPair) sessionChartPair = vis;
+      if (fxPairKey(vis) !== fxPairKey(sessionChartPair)) {
+        state.lastReason = "Staying on this chart: " + sessionChartPair;
+        log("Staying on this chart: " + sessionChartPair);
+        saveState(state); render();
+        return;
+      }
+      const p = { label: vis };
+      onPairChange(p.label);
       state.lastPair = p.label;
       let atOpen0 = false;
       try { atOpen0 = atCandleOpenWindow(); } catch (_eAo) { atOpen0 = false; }
@@ -4961,19 +5106,19 @@
       if (realTradeOpenNow()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx1) {}
       const wantDir = d.signal === "PUT" ? "down" : "up";
-      try {
-        if (candleTooClose() || !atCandleOpenWindow()) {
-          const nowW = Date.now();
-          if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
-            lastWaitCandleLogAt = nowW;
-            log("Wait candle open");
-          }
-          state.lastReason = "Wait candle open";
-          armCandleOpenClick(wantDir);
-          saveState(state); render();
-          return;
+      let atOpenClick = false;
+      try { atOpenClick = atCandleOpenWindow() && !candleTooClose(); } catch (_eCnd) { atOpenClick = false; }
+      if (!atOpenClick) {
+        const nowW = Date.now();
+        if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
+          lastWaitCandleLogAt = nowW;
+          log("Wait candle open");
         }
-      } catch (_eCnd) {}
+        state.lastReason = "Wait candle open";
+        armCandleOpenClick(wantDir);
+        saveState(state); render();
+        return;
+      }
       const r = await clickDir(wantDir);
       if (r && /Wait candle open/i.test(String(r.error || ""))) {
         state.lastReason = "Wait candle open";
@@ -5304,7 +5449,7 @@
       const st = (state.pairStats && state.pairStats[p.label]) || {};
       const sig = st.signal || "—";
       const cls = sig === "CALL" ? "call" : sig === "PUT" ? "put" : "skip";
-      const nbar = barCount(p.label);
+      const nbar = denseBars(p.label).length;
       return "<tr><td>" + esc(p.label) + "</td><td>" + esc(st.px || "—") + "</td><td>" + nbar + "/21</td><td class=\"" + cls + "\">" + esc(sig) + "</td><td>" + esc(st.reason || "—") + "</td></tr>";
     }).join("");
     settlePendingJournal();
@@ -5380,7 +5525,7 @@
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
         <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${barCount(state.lastPair || snap.asset || "")}/${CONFIG.minBarsForEma} bars · saved</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; return denseBars(lab).length; })()}/${CONFIG.minBarsForEma} bars · saved</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
@@ -5516,7 +5661,16 @@
         try { autoBtn.removeAttribute("data-qarm"); } catch (_eArm) {}
         state.autoCount = 0;
         state.lastReason = "Auto on · pair browse";
+        try {
+          const visOn = visiblePair();
+          if (visOn && !sessionChartPair) sessionChartPair = visOn;
+        } catch (_ePin) {}
         log("Auto on — staying on this chart");
+        try {
+          if (!durationEnsuredOnce && !timeSwitchGaveUp && !durationAttemptedThisBoot) {
+            maybeEnsureDurationIdle();
+          }
+        } catch (_eDurOn) {}
         scanWatchlist();
       }
       saveState(state); render();
@@ -5900,7 +6054,10 @@
 
   try {
     const vis0 = visiblePair();
-    if (vis0) onPairChange(vis0);
+    if (vis0) {
+      if (!sessionChartPair) sessionChartPair = vis0;
+      onPairChange(vis0);
+    }
   } catch (_eVis) {}
 
   log(scrape ? ("HUD on v" + CONFIG.version + " · CONFIG") : "HUD on, no scrape");
