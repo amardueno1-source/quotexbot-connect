@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.47
+quotexbot Chrome MV3 extension  v0.9.48-ext
 =======================================
 
 Load unpacked
@@ -16,8 +16,9 @@ DEMO only. Visible DOM. No cookies / SSID / unofficial APIs.
 Stay on the open chart. Auto clicks Up/Down on DEMO only.
 Auto ON only from a trusted Start auto click this session.
 Dashboard / mini / restore clicks must not start Auto.
-One open trade at a time. Never click Up/Down while a live $ countdown,
-reserved balance, or Trades badge ≥ 1 is on the platform.
+One open trade at a time. Skip Up/Down only if Trades badge ≥ 1, this-session
+reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
+Never treat the Time widget + Investment field as an open trade.
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
 only when that quote is live (finite v that changed, or last change < 2.5s).

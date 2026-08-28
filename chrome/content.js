@@ -1,14 +1,16 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.47-ext)
+ * quotexbot Chrome MV3 content script (v0.9.48-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
  * Dashboard / mini / restore clicks return immediately and must not start Auto.
  * Start auto only from a trusted click on the same Start auto button that
  * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
- * One open trade: never click Up/Down if a trades-list $ + MM:SS row, reserved
- * balance, or Trades badge ≥ 1 is live. Auto must not fire the opposite
- * direction while one is open; manual HUD Up skips if Down is open and vice versa.
+ * Skip Up/Down only if (a) Trades badge ≥ 1, (b) this-session reserved balance,
+ * or (c) a trades-list row: pair + CALL|PUT|Up|Down + $ stake + ticking MM:SS.
+ * Never treat the Time widget + Investment field, elLooksLikeTimePanel, or the
+ * order ticket as an open trade. While a REAL open trade exists, skip a second
+ * Up/Down in both directions. clickLock auto-clears after 3s if Trades is still 0.
  *
  * Live price: Price Now first (Pair Information panel quote, not only a node
  * whose own text is "Price Now"). Skip screenshot only when Price Now is live:
@@ -560,7 +562,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.47-ext",
+    version: "0.9.48-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -758,6 +760,7 @@
   const bootAt = Date.now();
   let lastClickAt = 0;
   let clickLock = false;
+  let clickLockAt = 0;
   let staleBusyCleared = false;
   let durationEnsuredOnce = false;
   let scanning = false;
@@ -1289,7 +1292,7 @@
   }
 
   function parsePriceNowNumber(raw) {
-    const str = String(raw || "");
+    const str = String(raw || "").replace(/(\d),(\d)/g, "$1.$2");
     if (!str) return null;
     const re = /(\d{1,6}\.\d{1,6})/g;
     let m;
@@ -1546,6 +1549,7 @@
     function score(c) {
       let sc = 0;
       if (c.dp >= 4 && c.dp <= 6) sc += 50;
+      else if (c.v >= 80 && c.v <= 400 && c.dp >= 2 && c.dp <= 3) sc += 45;
       else if (c.dp === 3) sc += 8;
       if (c.v >= range.lo && c.v <= range.hi) sc += 80;
       if (c.v >= 0.9 && c.v <= 1.25 && c.dp >= 4) sc += 20;
@@ -2178,7 +2182,13 @@
         if (state.lastGoodPx != null) return false;
         /* first tick already in CONFIG.ranges (lo/hi checked) — do not reject */
       }
-      /* JPY/PKR/BDT/ARS: 2–3 decimals are real (129.744 / 289.76). */
+      /* USD/DZD ~245 and JPY/PKR/BDT/ARS: 2–3 dp on 80–400 (3 integer digits) is real, not OCR junk. */
+      const midOtc = v >= 80 && v <= 400 && dec >= 2 && dec <= 3;
+      if (midOtc && v >= range.lo && v <= range.hi) {
+        if (state.lastGoodPx == null) return true;
+        const lastMid = state.lastGoodPx >= 80 && state.lastGoodPx <= 400;
+        if (!lastMid) return true;
+      }
       if (state.lastGoodPx != null) {
         const abs = Math.abs(v - state.lastGoodPx);
         const rel = abs / Math.max(Math.abs(state.lastGoodPx), 1e-6);
@@ -2186,7 +2196,8 @@
         if (rel > 0.01) {
           const tenths = abs > 0.08 && abs < 0.12;
           const bothIn = v >= range.lo && v <= range.hi && state.lastGoodPx >= range.lo && state.lastGoodPx <= range.hi;
-          if (!(tenths && bothIn)) return false;
+          if (midOtc && bothIn && rel <= 0.05) { /* 3-int-digit OTC: allow a few points of OCR noise */ }
+          else if (!(tenths && bothIn)) return false;
         }
       }
       return true;
@@ -3155,6 +3166,10 @@
       let t = "";
       try { t = (el.innerText || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
       if (!t || t.length < 8 || t.length > 240) continue;
+      try { if (elLooksLikeTimePanel(el) || elLooksLikeOrderTicket(el)) continue; } catch (_eTk) {}
+      /* Order ticket has both Up and Down buttons; a real trades-list row is one direction. */
+      if (/\b(call|up|higher|buy)\b/i.test(t) && /\b(put|down|lower|sell)\b/i.test(t)) continue;
+      if (TIME_LABELS.test(t) && /investment|amount|stake|инвест|сумма|cantidad|valor|ইনভেস্ট|বিনিয়োগ/i.test(t)) continue;
       if (/\bpending\s*trade\b/i.test(t) && !/\d{1,2}:\d{2}/.test(t)) continue;
       const pairs = t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g);
       if (!pairs || pairs.length !== 1) continue;
@@ -3196,11 +3211,11 @@
       let green = false;
       try { green = colorLooksGreen(el); } catch (_g) {}
       if (green && payout > 0 && (!chip || !chip.win)) chip = { win: true, pnl: payout };
-      /* OPEN if it looks like a real platform trade: pair + $ amount + ticking MM:SS.
-         Dir (CALL/PUT/Up/Down) is optional — icon-only rows still lock. Bare pair+timer
-         without $ (chart tab / Pair Information / candle clock) is NOT a trade. */
+      /* OPEN only if pair + CALL|PUT|Up|Down + $ stake + ticking MM:SS.
+         Time widget + Investment (order ticket) is never a trade. */
       const hasDollarAmt = /\$/.test(t) && (stake > 0 || /\$\s*\d|\d(?:\.\d+)?\s*\$/.test(t));
-      const realOpen = !!(hasDollarAmt && hasCd && cdSec != null && cdSec > 0);
+      const hasDir = dir === "CALL" || dir === "PUT";
+      const realOpen = !!(hasDollarAmt && hasDir && hasCd && cdSec != null && cdSec > 0);
       const settled = !realOpen && chip != null;
       found.push({
         y: r.top,
@@ -3480,11 +3495,34 @@
       if (r && (r.height > 90 || r.width > 320)) { n = n.parentElement; continue; }
       let t = "";
       try { t = String(n.innerText || n.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e0) { t = ""; }
-      if (t && t.length < 48 && TIME_LABELS.test(t) && !/\$/.test(t)) return true;
+      if (t && t.length < 80 && TIME_LABELS.test(t)) {
+        const isTradeRow = /\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/.test(t) && /\b(call|put|up|down)\b/i.test(t) && /\$/.test(t);
+        if (!isTradeRow) return true;
+      }
       try {
         const lab = String((n.getAttribute && (n.getAttribute("aria-label") || n.getAttribute("placeholder") || n.getAttribute("name"))) || "");
         if (lab && TIME_LABELS.test(lab)) return true;
       } catch (_e1) {}
+      n = n.parentElement;
+    }
+    return false;
+  }
+  function elLooksLikeOrderTicket(el) {
+    /* Right-panel Time + Investment form. Never treat 00:ss + 98$ as an open trade. */
+    let n = el;
+    for (let i = 0; i < 5 && n && n.nodeType === 1; i++) {
+      let r = null;
+      try { r = n.getBoundingClientRect(); } catch (_eR) {}
+      if (r && (r.height > 420 || r.width > 480)) { n = n.parentElement; continue; }
+      let t = "";
+      try { t = String(n.innerText || n.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e0) { t = ""; }
+      if (!t || t.length > 400) { n = n.parentElement; continue; }
+      const hasTime = TIME_LABELS.test(t);
+      const hasInv = /investment|amount|stake|инвест|сумма|cantidad|valor|ইনভেস্ট|বিনিয়োগ/i.test(t);
+      const pairN = (t.match(/\b[A-Za-z]{3}\s*\/\s*[A-Za-z]{3}\b/g) || []).length;
+      if (pairN >= 2) { n = n.parentElement; continue; }
+      if (hasTime && hasInv) return true;
+      if (hasTime && /\$/.test(t) && t.length < 220) return true;
       n = n.parentElement;
     }
     return false;
@@ -3522,7 +3560,7 @@
       }
     }
     if (bestMoney != null) return bestMoney;
-    if (bestZero != null) return bestZero;
+    /* Never treat bare 00:ss (Time widget / candle timer) as a trade countdown. */
     return null;
   }
   function tradesListCountdownSec() {
@@ -3651,7 +3689,6 @@
         if (!r || !r.open) continue;
         const s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
         if (s != null && isFinite(s) && s > 0) return true;
-        return true;
       }
     } catch (_e0) {}
     try {
@@ -3826,6 +3863,7 @@
           row.err = "Click missed, not journaled";
           row.result = "";
           clickLock = false;
+          clickLockAt = 0;
           changed = true;
           log("Click missed, not journaled");
           continue;
@@ -3880,7 +3918,7 @@
         }
       }
     }
-    if (!pendingJournal()) clickLock = false;
+    if (!pendingJournal()) { clickLock = false; clickLockAt = 0; }
     if (changed) saveState(state);
   }
 
@@ -4061,51 +4099,8 @@
     } catch (_eA) {}
   }
   function platformHasOpenTrade() {
-    const hud = document.getElementById("quotexbot-hud");
-    const dashEl = document.getElementById("quotexbot-dash");
-    const timeRaw = timeWidgetRaw();
-    const wide = window.innerWidth || 1200;
-    const nodes = [];
-    try {
-      forEachRoot(function (root) {
-        try {
-          const list = root.querySelectorAll("div, span, li, p, b, strong, label");
-          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
-        } catch (_eN) {}
-      });
-    } catch (_e0) {}
-    for (let i = 0; i < nodes.length; i++) {
-      const el = nodes[i];
-      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
-      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
-      if (elLooksLikeTimePanel(el)) continue;
-      let r;
-      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
-      if (!r || r.width < 8 || r.height < 8 || r.left < wide * 0.52) continue;
-      let t = "";
-      try { t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e2) { continue; }
-      if (!t || t.length > 96) continue;
-      const compact = t.replace(/\s+/g, "");
-      if (timeRaw && compact === timeRaw) continue;
-      if (/\bpending\s*trade\b/i.test(t)) continue;
-      if (/\b\d{2}:\d{2}:\d{2}\b/.test(t)) continue;
-      const cdMatch = t.match(/\b(\d{1,2}):(\d{2})\b/);
-      let cdOk = false;
-      if (cdMatch) {
-        const mm = parseInt(cdMatch[1], 10);
-        const ss = parseInt(cdMatch[2], 10);
-        if (isFinite(mm) && isFinite(ss) && ss <= 59 && mm < 15) {
-          if (mm === 0 && ss > 0) cdOk = true;
-          else if (/\$/.test(t)) cdOk = true;
-        }
-      }
-      const hasStake = /\$\s*\d|\d(?:\.\d+)?\s*\$/.test(t);
-      const hasDir = /\b(call|put|up|down|higher|lower)\b/i.test(t);
-      const settledOnly = /(?:^|[+\u2212\-])\s*\$?\s*\d+(?:\.\d+)?\s*\$/.test(t) && !cdOk;
-      if (settledOnly) continue;
-      if (cdOk && (hasStake || hasDir || /\$/.test(t))) return true;
-      if (/\bopen\b/i.test(t) && (hasStake || hasDir || cdOk)) return true;
-    }
+    /* Neutralized 0.9.48: Time widget 00:ss + Investment $ is NOT an open trade.
+       Do not set cdOk on bare 00:ss. Skip path uses badge / reserved / real row only. */
     return false;
   }
 
@@ -4142,6 +4137,9 @@
       }
     } catch (_e0) {}
     try {
+      let badge = 0;
+      try { badge = readTradesBadgeCount() || 0; } catch (_eB) { badge = 0; }
+      if (!balanceIsReserved() && badge < 1) return "";
       const last = lastOkJournal();
       if (last && last.ok && !last.result && (last.t || 0) >= bootAt) {
         const d = journalDirOf(last);
@@ -4153,9 +4151,10 @@
 
   function liveOpenEvidence() {
     let rowCd = null, moneyCd = null, reserved = false, badge = 0, plat = false;
-    /* Open if (a) a trades-list $ row with MM:SS exists (dir optional), (b) balance reserved
-       this session, (c) platform Trades badge ≥ 1, or (d) right-panel $ + countdown.
-       Never treat canvas OCR countdown or bare DOM 00:SS (chart candle) as trade-open. */
+    /* Skip Up/Down only if (a) Trades badge ≥ 1, (b) this-session balanceIsReserved(),
+       or (c) a trades-list row: pair + CALL|PUT|Up|Down + $ stake + ticking MM:SS.
+       Never treat Time widget + Investment, canvas OCR, or bare 00:SS as open.
+       Do not set rowCd = 1 just because a flagged row has no countdown. */
     try {
       const rows = listTradeRows();
       for (let i = 0; i < rows.length; i++) {
@@ -4164,8 +4163,6 @@
         const s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
         if (s != null && isFinite(s) && s > 0) {
           if (rowCd == null || s < rowCd) rowCd = s;
-        } else if (rowCd == null) {
-          rowCd = 1;
         }
       }
     } catch (_eR) {}
@@ -4177,8 +4174,8 @@
     } catch (_e0) {}
     try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
     try { badge = readTradesBadgeCount() || 0; } catch (_e4) { badge = 0; }
-    try { plat = !!platformHasOpenTrade(); } catch (_e5) { plat = false; }
-    const real = (rowCd != null && rowCd > 0) || reserved || badge >= 1 || plat;
+    plat = false;
+    const real = (rowCd != null && rowCd > 0) || reserved || badge >= 1;
     if (!real && !waitIgnoredLogged) {
       let ghost = false;
       try {
@@ -4204,19 +4201,15 @@
   function platformIdleNoTrade() {
     const ev = liveOpenEvidence();
     if (ev.rowCd != null && ev.rowCd > 0) return false;
-    if (ev.moneyCd != null && ev.moneyCd > 2) return false;
     if (ev.reserved) return false;
     if (ev.badge >= 1) return false;
-    if (ev.plat) return false;
     return true;
   }
   function realTradeOpenNow() {
     const ev = liveOpenEvidence();
     if (ev.rowCd != null && ev.rowCd > 0) return true;
-    if (ev.moneyCd != null && ev.moneyCd > 2) return true;
     if (ev.reserved) return true;
     if (ev.badge >= 1) return true;
-    if (ev.plat) return true;
     return false;
   }
   function pendingJournal() {
@@ -4234,26 +4227,43 @@
     const left = (CONFIG.cooldownMs || 65000) - (Date.now() - from);
     return left > 0 ? left : 0;
   }
+  function releaseClickLockIfIdle() {
+    /* clickLock auto-clears after 3s if Trades is still 0 and no reserved/real row. */
+    if (!clickLock) return;
+    const t0 = clickLockAt || lastClickAt || 0;
+    if (t0 && (Date.now() - t0) < 3000) return;
+    try {
+      if ((readTradesBadgeCount() || 0) >= 1) return;
+      if (balanceIsReserved()) return;
+      const rows = listTradeRows();
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i] && rows[i].open) return;
+      }
+    } catch (_e) {}
+    clickLock = false;
+    clickLockAt = 0;
+  }
   function recentClickGuard() {
+    try { releaseClickLockIfIdle(); } catch (_eR) {}
     if (clickLock) return true;
-    if (lastClickAt && (Date.now() - lastClickAt) < 2500) return true;
+    /* lastClickAt from Dashboard/MM must not block the first HUD Up after idle. */
     return false;
   }
   function tradeBusy() {
+    try { releaseClickLockIfIdle(); } catch (_eR) {}
     if (realTradeOpenNow()) return true;
-    if (recentClickGuard()) return true;
-    if (pendingJournal()) return true;
+    if (clickLock) return true;
     return false;
   }
   function tradeOpen() {
+    try { releaseClickLockIfIdle(); } catch (_eR) {}
     try { if (realTradeOpenNow()) return true; } catch (_eI1) {}
-    if (recentClickGuard()) return true;
-    try { if (pendingJournal()) return true; } catch (_eP) {}
+    if (clickLock) return true;
     return false;
   }
   function dirBlockedByOpenTrade(dir) {
-    /* Live platform trade blocks BOTH directions (no second click, no opposite).
-       Do not use clickLock/tradeBusy here — clickDir holds those during its own click. */
+    /* REAL open trade blocks BOTH directions (no second click, no opposite).
+       Ground truth: badge / reserved / real trades-list row only. */
     if (realTradeOpenNow()) return true;
     const live = openTradeDir();
     if (live) return true;
@@ -4293,9 +4303,8 @@
   }
   function tradeWaitSec() {
     const ev = liveOpenEvidence();
-    if (!(ev.rowCd > 0 || ev.moneyCd > 2 || ev.reserved || ev.badge >= 1 || ev.plat)) return 0;
+    if (!(ev.rowCd > 0 || ev.reserved || ev.badge >= 1)) return 0;
     if (ev.rowCd != null && ev.rowCd > 0) return ev.rowCd;
-    if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
     /* reserved only: never invent leftover duration (56s/45s/1s) from pending journal */
     return 0;
   }
@@ -4312,7 +4321,7 @@
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
     const ev = liveOpenEvidence();
-    const keep = (ev.rowCd != null && ev.rowCd > 0) || (ev.moneyCd != null && ev.moneyCd > 2) || ev.reserved || (ev.badge >= 1) || ev.plat;
+    const keep = (ev.rowCd != null && ev.rowCd > 0) || ev.reserved || (ev.badge >= 1);
     if (keep) {
       staleBusyCleared = true;
       log("Boot: open trade on platform, keeping one-trade lock");
@@ -4320,6 +4329,7 @@
     }
     staleBusyCleared = true;
     clickLock = false;
+    clickLockAt = 0;
     lastClickAt = 0;
     try {
       if (state.lastReason && /trade open|cooldown|wait \d+\s*s/i.test(String(state.lastReason))) {
@@ -4414,19 +4424,21 @@
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     if (dirBlockedByOpenTrade(dir) || tradeBusy() || realTradeOpenNow()) return tradeOpenError();
     try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
-    /* Take the lock BEFORE any await so a second Up/Down cannot sneak in. */
+    /* Take the lock BEFORE any await so a second Up/Down cannot sneak in.
+       Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block). */
     clickLock = true;
-    lastClickAt = Date.now();
+    clickLockAt = Date.now();
     try {
       try { await ensureDurationMode(); } catch (_eDur) {}
-      if (realTradeOpenNow()) return tradeOpenError();
+      if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
       if (snap.accountMode === "demo") {
         try { await applyMoneyManagement(); } catch (_eMm) {}
       }
-      if (realTradeOpenNow()) return tradeOpenError();
+      if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
       try {
         if (expiryTooClose()) {
           clickLock = false;
+          clickLockAt = 0;
           lastClickAt = 0;
           return tradeOpenError();
         }
@@ -4440,7 +4452,7 @@
       const r = dir === "down" ? scrape.clickDown(document, opts) : scrape.clickUp(document, opts);
       lastClickAt = Date.now();
       if (!r || !r.ok) {
-        if (!realTradeOpenNow()) clickLock = false;
+        if (!realTradeOpenNow()) { clickLock = false; clickLockAt = 0; }
         return r;
       }
       const filled = await waitForPlatformFill(fpBefore, balBefore, 2500);
@@ -4451,12 +4463,13 @@
           return tradeOpenError();
         }
         clickLock = false;
+        clickLockAt = 0;
         log("Click missed, not journaled");
         return { ok: false, error: "Click missed, not journaled", missed: true };
       }
       return r;
     } catch (err) {
-      if (!realTradeOpenNow()) clickLock = false;
+      if (!realTradeOpenNow()) { clickLock = false; clickLockAt = 0; }
       return { ok: false, error: (err && err.message) || "fail" };
     }
   }
@@ -5472,6 +5485,7 @@
     ensureHud();
     settlePendingJournal();
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
+    try { releaseClickLockIfIdle(); } catch (_eLk) {}
     if (state.auto && !sessionAuto) {
       state.auto = false;
       log("Auto blocked, no Start auto");
