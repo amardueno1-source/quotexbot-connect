@@ -6,6 +6,9 @@
  * Dashboard / mini / restore clicks return immediately and must not start Auto.
  * Start auto only from a trusted click on the same Start auto button that
  * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
+ * One open trade: never click Up/Down if a trades-list $ + MM:SS row, reserved
+ * balance, or Trades badge ≥ 1 is live. Auto must not fire the opposite
+ * direction while one is open; manual HUD Up skips if Down is open and vice versa.
  *
  * Live price: Price Now first (Pair Information panel quote, not only a node
  * whose own text is "Price Now"). Skip screenshot only when Price Now is live:
@@ -3193,10 +3196,11 @@
       let green = false;
       try { green = colorLooksGreen(el); } catch (_g) {}
       if (green && payout > 0 && (!chip || !chip.win)) chip = { win: true, pnl: payout };
-      /* OPEN only if it looks like a real platform trade: pair + CALL|PUT|Up|Down + $ amount + ticking MM:SS.
-         Bare pair+timer (chart tab / Pair Information / candle clock) is NOT a trade. */
+      /* OPEN if it looks like a real platform trade: pair + $ amount + ticking MM:SS.
+         Dir (CALL/PUT/Up/Down) is optional — icon-only rows still lock. Bare pair+timer
+         without $ (chart tab / Pair Information / candle clock) is NOT a trade. */
       const hasDollarAmt = /\$/.test(t) && (stake > 0 || /\$\s*\d|\d(?:\.\d+)?\s*\$/.test(t));
-      const realOpen = !!(dir && hasDollarAmt && hasCd && cdSec != null && cdSec > 0);
+      const realOpen = !!(hasDollarAmt && hasCd && cdSec != null && cdSec > 0);
       const settled = !realOpen && chip != null;
       found.push({
         y: r.top,
@@ -3646,12 +3650,13 @@
         const r = rows[i];
         if (!r || !r.open) continue;
         const s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
-        if (s != null && isFinite(s) && s > 2) return true;
+        if (s != null && isFinite(s) && s > 0) return true;
+        return true;
       }
     } catch (_e0) {}
     try {
       const rowCd = tradesListCountdownSec();
-      if (rowCd != null && rowCd > 2) return true;
+      if (rowCd != null && rowCd > 0) return true;
     } catch (_e1) {}
     return false;
   }
@@ -4104,16 +4109,76 @@
     return false;
   }
 
+  function readTradesBadgeCount() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    let best = 0;
+    try {
+      const nodes = document.querySelectorAll("button, a, span, div, li, p, b, [role='tab'], [role='button']");
+      const nMax = Math.min(nodes.length, SCAN_MAX * 2);
+      for (let i = 0; i < nMax; i++) {
+        const el = nodes[i];
+        if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+        if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+        let t = "";
+        try { t = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(); } catch (_e) { continue; }
+        if (!t || t.length > 48) continue;
+        if (!/\btrades?\b/i.test(t)) continue;
+        if (/\b(history|closed|journal)\b/i.test(t) && !/\bopen/i.test(t)) continue;
+        const m = t.match(/\btrades?\b[^0-9]{0,16}(\d{1,2})\b/i) || t.match(/\b(\d{1,2})\s*trades?\b/i);
+        if (!m) continue;
+        const n = parseInt(m[1], 10);
+        if (n >= 1 && n <= 30 && n > best) best = n;
+      }
+    } catch (_e0) {}
+    return best;
+  }
+  function openTradeDir() {
+    try {
+      const rows = listTradeRows();
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (r && r.open && (r.dir === "CALL" || r.dir === "PUT")) return r.dir;
+      }
+    } catch (_e0) {}
+    try {
+      const last = lastOkJournal();
+      if (last && last.ok && !last.result && (last.t || 0) >= bootAt) {
+        const d = journalDirOf(last);
+        if (d === "CALL" || d === "PUT") return d;
+      }
+    } catch (_e1) {}
+    return "";
+  }
+
   function liveOpenEvidence() {
-    let rowCd = null, moneyCd = null, reserved = false;
-    /* Open ONLY if (a) a real trades-list row exists (pair+dir+$+MM:SS) or (b) balance reserved this session.
+    let rowCd = null, moneyCd = null, reserved = false, badge = 0, plat = false;
+    /* Open if (a) a trades-list $ row with MM:SS exists (dir optional), (b) balance reserved
+       this session, (c) platform Trades badge ≥ 1, or (d) right-panel $ + countdown.
        Never treat canvas OCR countdown or bare DOM 00:SS (chart candle) as trade-open. */
     try {
+      const rows = listTradeRows();
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || !r.open) continue;
+        const s = r.cdSec != null ? Number(r.cdSec) : parseTradeCdSec(r.t);
+        if (s != null && isFinite(s) && s > 0) {
+          if (rowCd == null || s < rowCd) rowCd = s;
+        } else if (rowCd == null) {
+          rowCd = 1;
+        }
+      }
+    } catch (_eR) {}
+    try {
       const s = tradesListCountdownSec();
-      if (s != null && isFinite(s) && s > 2) rowCd = s;
+      if (s != null && isFinite(s) && s > 0) {
+        if (rowCd == null || s < rowCd) rowCd = s;
+      }
     } catch (_e0) {}
     try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
-    const real = (rowCd != null && rowCd > 2) || reserved;
+    try { badge = readTradesBadgeCount() || 0; } catch (_e4) { badge = 0; }
+    try { plat = !!platformHasOpenTrade(); } catch (_e5) { plat = false; }
+    const real = (rowCd != null && rowCd > 0) || reserved || badge >= 1 || plat;
     if (!real && !waitIgnoredLogged) {
       let ghost = false;
       try {
@@ -4134,20 +4199,24 @@
         log("Wait ignored, no open trade");
       }
     }
-    return { rowCd: rowCd, moneyCd: moneyCd, reserved: reserved };
+    return { rowCd: rowCd, moneyCd: moneyCd, reserved: reserved, badge: badge, plat: plat };
   }
   function platformIdleNoTrade() {
     const ev = liveOpenEvidence();
-    if (ev.rowCd != null && ev.rowCd > 2) return false;
+    if (ev.rowCd != null && ev.rowCd > 0) return false;
     if (ev.moneyCd != null && ev.moneyCd > 2) return false;
     if (ev.reserved) return false;
+    if (ev.badge >= 1) return false;
+    if (ev.plat) return false;
     return true;
   }
   function realTradeOpenNow() {
     const ev = liveOpenEvidence();
-    if (ev.rowCd != null && ev.rowCd > 2) return true;
+    if (ev.rowCd != null && ev.rowCd > 0) return true;
     if (ev.moneyCd != null && ev.moneyCd > 2) return true;
     if (ev.reserved) return true;
+    if (ev.badge >= 1) return true;
+    if (ev.plat) return true;
     return false;
   }
   function pendingJournal() {
@@ -4165,16 +4234,30 @@
     const left = (CONFIG.cooldownMs || 65000) - (Date.now() - from);
     return left > 0 ? left : 0;
   }
+  function recentClickGuard() {
+    if (clickLock) return true;
+    if (lastClickAt && (Date.now() - lastClickAt) < 2500) return true;
+    return false;
+  }
   function tradeBusy() {
     if (realTradeOpenNow()) return true;
-    try { if (platformIdleNoTrade()) return false; } catch (_eI) {}
-    if (clickLock) return true;
+    if (recentClickGuard()) return true;
     if (pendingJournal()) return true;
     return false;
   }
   function tradeOpen() {
-    try { if (platformIdleNoTrade()) return false; } catch (_eI0) {}
-    try { return !!realTradeOpenNow(); } catch (_eI1) { return false; }
+    try { if (realTradeOpenNow()) return true; } catch (_eI1) {}
+    if (recentClickGuard()) return true;
+    try { if (pendingJournal()) return true; } catch (_eP) {}
+    return false;
+  }
+  function dirBlockedByOpenTrade(dir) {
+    /* Live platform trade blocks BOTH directions (no second click, no opposite).
+       Do not use clickLock/tradeBusy here — clickDir holds those during its own click. */
+    if (realTradeOpenNow()) return true;
+    const live = openTradeDir();
+    if (live) return true;
+    return false;
   }
   function liveOcrAgeMs() {
     if (lastCanvasOcr && lastCanvasOcr.v != null && lastCanvasOcr.at) {
@@ -4210,8 +4293,8 @@
   }
   function tradeWaitSec() {
     const ev = liveOpenEvidence();
-    if (!(ev.rowCd > 2 || ev.moneyCd > 2 || ev.reserved)) return 0;
-    if (ev.rowCd != null && ev.rowCd > 2) return ev.rowCd;
+    if (!(ev.rowCd > 0 || ev.moneyCd > 2 || ev.reserved || ev.badge >= 1 || ev.plat)) return 0;
+    if (ev.rowCd != null && ev.rowCd > 0) return ev.rowCd;
     if (ev.moneyCd != null && ev.moneyCd > 2) return ev.moneyCd;
     /* reserved only: never invent leftover duration (56s/45s/1s) from pending journal */
     return 0;
@@ -4229,7 +4312,7 @@
   function clearStaleBusyIfIdle() {
     if (staleBusyCleared) return;
     const ev = liveOpenEvidence();
-    const keep = (ev.rowCd != null && ev.rowCd > 2) || (ev.moneyCd != null && ev.moneyCd > 2) || ev.reserved;
+    const keep = (ev.rowCd != null && ev.rowCd > 0) || (ev.moneyCd != null && ev.moneyCd > 2) || ev.reserved || (ev.badge >= 1) || ev.plat;
     if (keep) {
       staleBusyCleared = true;
       log("Boot: open trade on platform, keeping one-trade lock");
@@ -4321,46 +4404,59 @@
     }
     return false;
   }
+  function tradeOpenError() {
+    const w = tradeWaitSec();
+    return { ok: false, error: w > 2 ? ("Trade open, wait " + w + "s") : "Trade open" };
+  }
   async function clickDir(dir) {
     if (!scrape) return { ok: false, error: "scrape missing" };
     const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
-    if (tradeBusy()) {
-      const w = tradeWaitSec();
-      return { ok: false, error: w > 2 ? ("Trade open, wait " + w + "s") : "Trade open" };
-    }
-    try { if (expiryTooClose()) { const w2 = tradeWaitSec(); return { ok: false, error: w2 > 2 ? ("Trade open, wait " + w2 + "s") : "Trade open" }; } } catch (_eEx) {}
-    try { await ensureDurationMode(); } catch (_eDur) {}
-    if (snap.accountMode === "demo") {
-      try { await applyMoneyManagement(); } catch (_eMm) {}
-    }
-    if (tradeBusy()) {
-      const w = tradeWaitSec();
-      return { ok: false, error: w > 2 ? ("Trade open, wait " + w + "s") : "Trade open" };
-    }
-    try { if (expiryTooClose()) { const w2 = tradeWaitSec(); return { ok: false, error: w2 > 2 ? ("Trade open, wait " + w2 + "s") : "Trade open" }; } } catch (_eEx2) {}
-    capturePreClickMoney();
-    if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
-    let fpBefore = "";
-    try { fpBefore = tradesFingerprint(); } catch (_fpB) { fpBefore = ""; }
-    const balBefore = lastPreClickBal;
+    if (dirBlockedByOpenTrade(dir) || tradeBusy() || realTradeOpenNow()) return tradeOpenError();
+    try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
+    /* Take the lock BEFORE any await so a second Up/Down cannot sneak in. */
     clickLock = true;
+    lastClickAt = Date.now();
     try {
+      try { await ensureDurationMode(); } catch (_eDur) {}
+      if (realTradeOpenNow()) return tradeOpenError();
+      if (snap.accountMode === "demo") {
+        try { await applyMoneyManagement(); } catch (_eMm) {}
+      }
+      if (realTradeOpenNow()) return tradeOpenError();
+      try {
+        if (expiryTooClose()) {
+          clickLock = false;
+          lastClickAt = 0;
+          return tradeOpenError();
+        }
+      } catch (_eEx2) {}
+      capturePreClickMoney();
+      if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
+      let fpBefore = "";
+      try { fpBefore = tradesFingerprint(); } catch (_fpB) { fpBefore = ""; }
+      const balBefore = lastPreClickBal;
       const opts = lastMmAppliedStake != null ? { stake: String(lastMmAppliedStake) } : {};
       const r = dir === "down" ? scrape.clickDown(document, opts) : scrape.clickUp(document, opts);
+      lastClickAt = Date.now();
       if (!r || !r.ok) {
-        clickLock = false;
+        if (!realTradeOpenNow()) clickLock = false;
         return r;
       }
-      const filled = await waitForPlatformFill(fpBefore, balBefore, 2000);
+      const filled = await waitForPlatformFill(fpBefore, balBefore, 2500);
       if (!filled) {
+        try { await sleep(300); } catch (_eS) {}
+        if (realTradeOpenNow()) {
+          log("Trade open, skip second click");
+          return tradeOpenError();
+        }
         clickLock = false;
         log("Click missed, not journaled");
         return { ok: false, error: "Click missed, not journaled", missed: true };
       }
       return r;
     } catch (err) {
-      clickLock = false;
+      if (!realTradeOpenNow()) clickLock = false;
       return { ok: false, error: (err && err.message) || "fail" };
     }
   }
@@ -4487,11 +4583,11 @@
       saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
-      if (tradeOpen()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); return; }
+      if (tradeOpen() || realTradeOpenNow() || dirBlockedByOpenTrade(d.signal)) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx1) {}
 
       await sleep(400 + Math.floor(Math.random() * 600));
-      if (tradeOpen()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); return; }
+      if (tradeOpen() || realTradeOpenNow() || dirBlockedByOpenTrade(d.signal)) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx2) {}
       if (!(await waitForFreshOcr(1600))) {
         state.lastReason = "Price stale, skip";
@@ -4947,13 +5043,15 @@
       return;
     }
     if (act === "up" || act === "down") {
-      if (tradeBusy()) {
+      if (tradeBusy() || realTradeOpenNow() || dirBlockedByOpenTrade(act)) {
         const left = tradeWaitSec();
+        const skip = "Trade open, skip " + (act === "down" ? "Down" : "Up");
         if (left > 2) {
           log("Trade open, wait " + left + "s");
           state.lastReason = "Trade open, wait " + left + "s";
         } else {
-          clearGhostWaitReason();
+          log(skip);
+          state.lastReason = skip;
         }
         saveState(state); render();
         return;
