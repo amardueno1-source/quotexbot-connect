@@ -1,15 +1,16 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.52-ext)
+ * quotexbot Chrome MV3 content script (v0.9.53-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
- * Switch Time with realishClick (pointerdown/up), not el.click(). If Time is
- * still wall-clock after retries, skip the trade — do not click Up/Down.
+ * Switch Time with realishClick (pointerdown/up), not el.click(). SWITCH TIME
+ * on idle; never block a candle-open click because Time is still clock HH:MM.
  * HUD Up/Down must not start Auto (dashClickGuard + clearAutoArm).
- * Enter only in the first ~3s of a 1m candle (remaining 00:57–00:60, or a new HH:MM).
- * Mid-candle 00:08–00:56: log Wait candle open, do not click Up/Down. Last ~8s still skip.
+ * Candle open = wall-clock seconds 0-4 (new Date().getSeconds() <= 4). Do not
+ * treat Time widget HH:MM or a ~00:51 clock-expiry leftover as candle remain.
+ * Mid-candle seconds 5-51: log Wait candle open, do not click Up/Down.
+ * Seconds 52-59 too close: wait for next :00. Last ~8s still skip via candleTooClose.
  * Auto decides from stored bars — never 4s sampleOtc / SWITCH TIME / MM sleeps in the open window.
- * DEMO 0.9.50: fill 7s late (16-tick + SWITCH TIME + MM) and 22s late (mid-body). Click only 00:57–00:60.
  * Dashboard / mini / restore clicks return immediately and must not start Auto.
  * Start auto only from a trusted click on the same Start auto button that
  * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
@@ -576,7 +577,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.52-ext",
+    version: "0.9.53-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -4139,34 +4140,25 @@
     return wallCandleRemainSec();
   }
   function atCandleOpenWindow() {
-    let rem = null;
-    try { rem = candleRemainSec(); } catch (_e) { rem = null; }
-    if (rem != null && rem >= 57 && rem <= 60) return true;
-    if (rem != null && rem >= 1 && rem <= 56) return false;
+    /* Wall-clock seconds 0-4 are the source of truth. Ignore Time widget
+       HH:MM and clock-expiry leftover (~00:51) — those are not candle remain. */
     try {
       const sec = new Date().getSeconds();
-      if (sec <= 3) return true;
-    } catch (_e2) {}
+      if (sec <= 4) return true;
+    } catch (_e) {}
     return false;
   }
   function midCandleRemain() {
-    let rem = null;
-    try { rem = candleRemainSec(); } catch (_e) { rem = null; }
-    if (rem != null && rem >= 8 && rem <= 56) return true;
-    if (rem != null && (rem >= 57 || rem <= 7)) return false;
     try {
       const sec = new Date().getSeconds();
-      if (sec >= 4 && sec <= 52) return true;
-    } catch (_e2) {}
+      if (sec >= 5 && sec <= 51) return true;
+    } catch (_e) {}
     return false;
   }
   function candleTooClose() {
     try {
       if (atCandleOpenWindow()) return false;
     } catch (_e0) {}
-    let rem = null;
-    try { rem = candleRemainSec(); } catch (_e1) { rem = null; }
-    if (rem != null && rem > 0 && rem <= 8) return true;
     try {
       const sec = new Date().getSeconds();
       if (sec >= 52 && sec <= 59) return true;
@@ -4634,6 +4626,7 @@
   async function maybeEnsureDurationIdle() {
     if (durationEnsuredOnce) return;
     if (realTradeOpenNow()) return;
+    try { if (atCandleOpenWindow()) return; } catch (_eOpen) {}
     let raw = "";
     try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR) { raw = ""; }
     if (timeLooksDuration(raw)) {
@@ -4656,16 +4649,12 @@
     pendingCandleDir = "";
   }
   function msUntilCandleOpen() {
-    let rem = null;
-    try { rem = candleRemainSec(); } catch (_e0) { rem = null; }
-    if (rem != null && rem >= 57) return 0;
-    if (rem != null && rem >= 0 && rem < 57) return Math.max(50, rem * 1000 - 150);
     try {
       const d = new Date();
       const sec = d.getSeconds();
       const ms = d.getMilliseconds();
-      if (sec <= 3) return 0;
-      return Math.max(50, (60 - sec) * 1000 - ms - 120);
+      if (sec <= 4) return 0;
+      return Math.max(50, (60 - sec) * 1000 - ms - 80);
     } catch (_e1) {}
     return 1000;
   }
@@ -4767,18 +4756,28 @@
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     if (realTradeOpenNow() || tradeBusy()) return tradeOpenError();
     try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
-    try { if (candleTooClose()) { return tradeOpenError(); } } catch (_eCd) {}
     try {
       if (!atCandleOpenWindow()) {
-        log("Wait candle open");
+        const nowW = Date.now();
+        if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
+          lastWaitCandleLogAt = nowW;
+          log("Wait candle open");
+        }
         return { ok: false, error: "Wait candle open", waitCandle: true };
       }
     } catch (_eOp0) {}
+    try { if (candleTooClose()) { return tradeOpenError(); } } catch (_eCd) {}
+    /* Clock at seconds 0-4 expires at the next HH:MM ≈ 1m. Allow the open
+       click even if Time is still clock. SWITCH TIME stays idle-only. */
     let stillClock = false;
     try { stillClock = timeIsClockMode(); } catch (_eClk0) { stillClock = false; }
     if (stillClock) {
-      log("Time still clock, skip");
-      return { ok: false, error: "Time still clock, skip" };
+      let atOpenClk = false;
+      try { atOpenClk = atCandleOpenWindow(); } catch (_eAoC) { atOpenClk = false; }
+      if (!atOpenClk) {
+        log("Time still clock, skip");
+        return { ok: false, error: "Time still clock, skip" };
+      }
     }
     /* Take the lock BEFORE any await so a second Up/Down cannot sneak in.
        Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block).
@@ -4792,6 +4791,19 @@
       }
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
       try {
+        if (!atCandleOpenWindow()) {
+          clickLock = false;
+          clickLockAt = 0;
+          lastClickAt = 0;
+          const nowW2 = Date.now();
+          if (!lastWaitCandleLogAt || nowW2 - lastWaitCandleLogAt > 8000) {
+            lastWaitCandleLogAt = nowW2;
+            log("Wait candle open");
+          }
+          return { ok: false, error: "Wait candle open", waitCandle: true };
+        }
+      } catch (_eOp1) {}
+      try {
         if (expiryTooClose() || candleTooClose()) {
           clickLock = false;
           clickLockAt = 0;
@@ -4799,15 +4811,6 @@
           return tradeOpenError();
         }
       } catch (_eEx2) {}
-      try {
-        if (!atCandleOpenWindow()) {
-          clickLock = false;
-          clickLockAt = 0;
-          lastClickAt = 0;
-          log("Wait candle open");
-          return { ok: false, error: "Wait candle open", waitCandle: true };
-        }
-      } catch (_eOp1) {}
       capturePreClickMoney();
       if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
       let fpBefore = "";
