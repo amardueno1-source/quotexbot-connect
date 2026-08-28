@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.48-ext)
+ * quotexbot Chrome MV3 content script (v0.9.49-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
@@ -11,6 +11,11 @@
  * Never treat the Time widget + Investment field, elLooksLikeTimePanel, or the
  * order ticket as an open trade. While a REAL open trade exists, skip a second
  * Up/Down in both directions. clickLock auto-clears after 3s if Trades is still 0.
+ * Pending journal (ok, no result) is not an open trade after Trades=0.
+ * dirBlockedByOpenTrade and skip-second-click use only realTradeOpenNow()
+ * (badge ≥ 1 OR this-session reserved OR real $ + dir + MM:SS row).
+ * When Trades=0 and not reserved: clickLock=false; settle or mark missed
+ * after expiry+2s. Log once: Pending lock cleared, ready for next.
  *
  * Live price: Price Now first (Pair Information panel quote, not only a node
  * whose own text is "Price Now"). Skip screenshot only when Price Now is live:
@@ -562,12 +567,12 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.48-ext",
+    version: "0.9.49-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
     maxAuto: 10,
-    cooldownMs: 65000,
+    cooldownMs: 5000,
     barBucketMs: 15000,
     minTicks: 2,
     sampleTicks: 16,
@@ -755,12 +760,14 @@
     if (!Array.isArray(state.journal)) state.journal = [];
     state.journal.push(row);
     if (state.journal.length > 80) state.journal = state.journal.slice(-80);
+    pendingLockClearedLogged = false;
   }
 
   const bootAt = Date.now();
   let lastClickAt = 0;
   let clickLock = false;
   let clickLockAt = 0;
+  let pendingLockClearedLogged = false;
   let staleBusyCleared = false;
   let durationEnsuredOnce = false;
   let scanning = false;
@@ -3705,7 +3712,16 @@
     let bal = null;
     try { bal = readPlatformBalance(); } catch (_e) { bal = null; }
     if (!(stake >= 1) || !isFinite(pre) || pre < 1 || bal == null) return false;
-    return bal <= pre - Math.max(0.5, stake * 0.4);
+    if (!(bal <= pre - Math.max(0.5, stake * 0.4))) return false;
+    /* After expiry, Trades=0 means the stake is not held — do not keep reserved. */
+    const age = Date.now() - (last.t || 0);
+    const dur = saneDurMs(last.durMs);
+    let badge = 0;
+    try { badge = readTradesBadgeCount() || 0; } catch (_eB) { badge = 0; }
+    let rowOpen = false;
+    try { rowOpen = hasOpenTradesListRow(); } catch (_eR) { rowOpen = false; }
+    if (badge < 1 && !rowOpen && age >= dur + 2000) return false;
+    return true;
   }
   function shortCountdownUncorroborated(cd) {
     if (cd == null || cd <= 0 || cd > 2) return false;
@@ -3757,7 +3773,10 @@
     let idle = false;
     try { idle = platformIdleNoTrade(); } catch (_eI) { idle = false; }
     const countingDown = !idle && (liveOpen || (cd != null && cd > 2));
-    if (countingDown) return;
+    if (countingDown) {
+      try { clearPendingLockIfIdle(); } catch (_ePL0) {}
+      try { if (realTradeOpenNow()) return; } catch (_ePL1) { return; }
+    }
     const used = {};
     for (let i = 0; i < state.journal.length; i++) {
       const r = state.journal[i];
@@ -3856,7 +3875,7 @@
       }
 
       /* Phantom: Trades 0, no countdown, balance not reserved — drop pending lock. */
-      if (idle && !row.result && age >= 2000) {
+      if (idle && !row.result && age >= 2000 && age < dur) {
         const delta0 = hasPre && balNow != null ? round2(balNow - pre) : 0;
         if (!(delta0 > 0.04)) {
           row.ok = false;
@@ -3919,6 +3938,7 @@
       }
     }
     if (!pendingJournal()) { clickLock = false; clickLockAt = 0; }
+    try { clearPendingLockIfIdle(); } catch (_ePL2) {}
     if (changed) saveState(state);
   }
 
@@ -4129,6 +4149,7 @@
     return best;
   }
   function openTradeDir() {
+    /* Direction of a REAL open trades-list row only. Never pending journal. */
     try {
       const rows = listTradeRows();
       for (let i = 0; i < rows.length; i++) {
@@ -4136,16 +4157,6 @@
         if (r && r.open && (r.dir === "CALL" || r.dir === "PUT")) return r.dir;
       }
     } catch (_e0) {}
-    try {
-      let badge = 0;
-      try { badge = readTradesBadgeCount() || 0; } catch (_eB) { badge = 0; }
-      if (!balanceIsReserved() && badge < 1) return "";
-      const last = lastOkJournal();
-      if (last && last.ok && !last.result && (last.t || 0) >= bootAt) {
-        const d = journalDirOf(last);
-        if (d === "CALL" || d === "PUT") return d;
-      }
-    } catch (_e1) {}
     return "";
   }
 
@@ -4174,6 +4185,17 @@
     } catch (_e0) {}
     try { reserved = !!balanceIsReserved(); } catch (_e3) { reserved = false; }
     try { badge = readTradesBadgeCount() || 0; } catch (_e4) { badge = 0; }
+    /* Leftover Trades badge after expiry must not keep Auto locked. */
+    if (badge >= 1 && (rowCd == null || rowCd <= 0) && !reserved) {
+      try {
+        const last = lastOkJournal();
+        if (last && last.ok && !last.result && (last.t || 0) >= bootAt) {
+          const age = Date.now() - (last.t || 0);
+          const dur = saneDurMs(last.durMs);
+          if (age >= dur + 2000) badge = 0;
+        }
+      } catch (_eBg) {}
+    }
     plat = false;
     const real = (rowCd != null && rowCd > 0) || reserved || badge >= 1;
     if (!real && !waitIgnoredLogged) {
@@ -4227,19 +4249,72 @@
     const left = (CONFIG.cooldownMs || 65000) - (Date.now() - from);
     return left > 0 ? left : 0;
   }
-  function releaseClickLockIfIdle() {
-    /* clickLock auto-clears after 3s if Trades is still 0 and no reserved/real row. */
-    if (!clickLock) return;
-    const t0 = clickLockAt || lastClickAt || 0;
-    if (t0 && (Date.now() - t0) < 3000) return;
-    try {
-      if ((readTradesBadgeCount() || 0) >= 1) return;
-      if (balanceIsReserved()) return;
-      const rows = listTradeRows();
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i] && rows[i].open) return;
+  function clearPendingLockIfIdle() {
+    /* When Trades=0 and not reserved, drop clickLock and leftover pending journal
+       so Auto can take the next signal. Do not treat pending journal as open. */
+    let real = false;
+    try { real = realTradeOpenNow(); } catch (_e0) { real = false; }
+    if (real) return false;
+    const last = lastOkJournal();
+    const pending = !!(last && last.ok && !last.result && (last.t || 0) >= bootAt);
+    const age = pending ? (Date.now() - (last.t || 0)) : 0;
+    const dur = pending ? saneDurMs(last.durMs) : 0;
+    const pastExpiry = pending && age >= dur + 2000;
+    if (clickLock) {
+      const t0 = clickLockAt || lastClickAt || 0;
+      if (pastExpiry || !t0 || (Date.now() - t0) >= 3000) {
+        clickLock = false;
+        clickLockAt = 0;
       }
-    } catch (_e) {}
+    }
+    if (!pending || !pastExpiry) return false;
+    let balNow = null;
+    try { balNow = readPlatformBalance(); } catch (_b) { balNow = null; }
+    const pre = Number(last.bal);
+    const hasPre = isFinite(pre) && pre > 0;
+    const delta = hasPre && balNow != null ? round2(balNow - pre) : null;
+    let settled = false;
+    if (delta != null && delta > 0.04) {
+      settled = applyJournalResult(last, "win", delta, false);
+      if (settled) {
+        try { notePair(last.pair, { lastResult: "win", lastPnl: last.pnl }); } catch (_np) {}
+        log("Profit " + fmtMoney(last.pnl) + " · " + (last.pair || "") + (last.pos || last.signal ? " " + (last.pos || last.signal) : "") + (last.dur ? " · " + last.dur : ""));
+      }
+    } else if (delta != null) {
+      settled = applyJournalResult(last, "loss", Math.abs(delta) < 0.05 ? 0 : delta, false);
+      if (settled) {
+        try { notePair(last.pair, { lastResult: "loss", lastPnl: last.pnl }); } catch (_np2) {}
+        log("Loss " + fmtMoney(last.pnl) + " · " + (last.pair || "") + (last.pos || last.signal ? " " + (last.pos || last.signal) : "") + (last.dur ? " · " + last.dur : ""));
+      }
+    }
+    if (!settled && !last.result) {
+      last.ok = false;
+      last.err = "Click missed, not journaled";
+      last.result = "";
+    }
+    if (!pendingLockClearedLogged) {
+      pendingLockClearedLogged = true;
+      log("Pending lock cleared, ready for next");
+    }
+    try { saveState(state); } catch (_s) {}
+    return true;
+  }
+  function releaseClickLockIfIdle() {
+    /* clickLock auto-clears after 3s if Trades is still 0 and no reserved/real row.
+       After expiry+2s with no real open trade, force-clear immediately. */
+    if (!clickLock) return;
+    try { if (realTradeOpenNow()) return; } catch (_e0) {}
+    const t0 = clickLockAt || lastClickAt || 0;
+    let expiredPending = false;
+    try {
+      const last = lastOkJournal();
+      if (last && last.ok && !last.result && (last.t || 0) >= bootAt) {
+        const age = Date.now() - (last.t || 0);
+        const dur = saneDurMs(last.durMs);
+        if (age >= dur + 2000) expiredPending = true;
+      }
+    } catch (_e1) {}
+    if (!expiredPending && t0 && (Date.now() - t0) < 3000) return;
     clickLock = false;
     clickLockAt = 0;
   }
@@ -4263,11 +4338,8 @@
   }
   function dirBlockedByOpenTrade(dir) {
     /* REAL open trade blocks BOTH directions (no second click, no opposite).
-       Ground truth: badge / reserved / real trades-list row only. */
-    if (realTradeOpenNow()) return true;
-    const live = openTradeDir();
-    if (live) return true;
-    return false;
+       Ground truth: realTradeOpenNow() only — never pending journal. */
+    try { return realTradeOpenNow(); } catch (_e) { return false; }
   }
   function liveOcrAgeMs() {
     if (lastCanvasOcr && lastCanvasOcr.v != null && lastCanvasOcr.at) {
@@ -4422,7 +4494,7 @@
     if (!scrape) return { ok: false, error: "scrape missing" };
     const snap = snapDoc();
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
-    if (dirBlockedByOpenTrade(dir) || tradeBusy() || realTradeOpenNow()) return tradeOpenError();
+    if (realTradeOpenNow() || tradeBusy()) return tradeOpenError();
     try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
     /* Take the lock BEFORE any await so a second Up/Down cannot sneak in.
        Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block). */
@@ -4504,7 +4576,8 @@
         saveState(state); render();
         return;
       }
-      if (tradeOpen()) {
+      try { clearPendingLockIfIdle(); } catch (_ePL3) {}
+      if (realTradeOpenNow()) {
         const left = tradeWaitSec();
         if (left > 2) {
           state.lastReason = "Trade open, wait " + left + "s";
@@ -4513,10 +4586,11 @@
             lastWaitLogSig = sig;
             log("Waiting on last trade " + left + "s");
           }
-        } else {
-          lastWaitLogSig = "";
-          clearGhostWaitReason();
+          saveState(state); render();
+          return;
         }
+        lastWaitLogSig = "";
+        clearGhostWaitReason();
         saveState(state); render();
         return;
       }
@@ -4596,11 +4670,11 @@
       saveState(state); render(); renderDash();
 
       if (d.signal !== "CALL" && d.signal !== "PUT") return;
-      if (tradeOpen() || realTradeOpenNow() || dirBlockedByOpenTrade(d.signal)) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
+      if (realTradeOpenNow()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx1) {}
 
       await sleep(400 + Math.floor(Math.random() * 600));
-      if (tradeOpen() || realTradeOpenNow() || dirBlockedByOpenTrade(d.signal)) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
+      if (realTradeOpenNow()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx2) {}
       if (!(await waitForFreshOcr(1600))) {
         state.lastReason = "Price stale, skip";
@@ -5056,7 +5130,7 @@
       return;
     }
     if (act === "up" || act === "down") {
-      if (tradeBusy() || realTradeOpenNow() || dirBlockedByOpenTrade(act)) {
+      if (realTradeOpenNow() || tradeBusy()) {
         const left = tradeWaitSec();
         const skip = "Trade open, skip " + (act === "down" ? "Down" : "Up");
         if (left > 2) {
@@ -5486,6 +5560,7 @@
     settlePendingJournal();
     try { clearStaleBusyIfIdle(); } catch (_eB) {}
     try { releaseClickLockIfIdle(); } catch (_eLk) {}
+    try { clearPendingLockIfIdle(); } catch (_ePL4) {}
     if (state.auto && !sessionAuto) {
       state.auto = false;
       log("Auto blocked, no Start auto");

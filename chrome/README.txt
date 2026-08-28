@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.48-ext
+quotexbot Chrome MV3 extension  v0.9.49-ext
 =======================================
 
 Load unpacked
@@ -19,6 +19,8 @@ Dashboard / mini / restore clicks must not start Auto.
 One open trade at a time. Skip Up/Down only if Trades badge ≥ 1, this-session
 reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
 Never treat the Time widget + Investment field as an open trade.
+Pending journal is not an open trade after Trades=0. Auto takes the next
+signal once the last trade expires (small 2–3s gap OK).
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
 only when that quote is live (finite v that changed, or last change < 2.5s).
