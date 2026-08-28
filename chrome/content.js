@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.59-ext)
+ * quotexbot Chrome MV3 content script (v0.9.60-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -26,12 +26,12 @@
  * order ticket as an open trade. While a REAL open trade exists, skip a second
  * Up/Down in both directions. clickLock auto-clears after 3s if Trades is still 0.
  * Pending journal (ok, no result) is not an open trade after Trades=0.
- * Auto NEVER clicks if denseBars < 21 (hard gate in clickDir, not only HUD SKIP).
+ * Auto NEVER clicks if stored bars with n>=1 < 21 (hard gate in clickDir, not only HUD SKIP).
  * Stay on the already-open chart. NEVER click another pair tab/row. Pin pair at
  * boot / Start auto. If (i) opens the asset list or changes the pair: close it
  * and ban further (i) for the session (do not un-ban on pair change).
  * scrape.click Up/Down only if getSeconds()<=4 at the click (fail closed).
- * Auto skips until 21 dense bars; no 2-tick CALL. USD/BRL 0.14–0.32.
+ * Auto skips until 21 stored bars (n>=1); no 2-tick CALL. USD/BRL 0.14–0.32.
  * Price Now must pass ok() even when lastGoodPx is null (no first-tick bypass).
  * dirBlockedByOpenTrade and skip-second-click use only realTradeOpenNow()
  * (badge ≥ 1 OR this-session reserved OR real $ + dir + MM:SS row).
@@ -78,6 +78,11 @@
  * change: onPairChange returns without lastSeenPair or resetLivePrice.
  * visiblePair never returns junk; ingestTicks/denseBars/HUD History use
  * the sane pair. Hold lastGood 60s on the same chart so OTC is not —.
+ * 0.9.60: History must not fall while idle. livePxHeld / OCR miss still
+ * ingest lastGoodPx (flat bars OK). HUD History and Auto/clickDir 21-bar
+ * gate use stored bars n>=1, not denseBars n>=3. minBarsForEma stays 21.
+ * sessionHighWater[canon] is monotonic this session except a real pair
+ * change (isRealFxPair). decide() uses n>=1 closes.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -618,7 +623,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.59-ext",
+    version: "0.9.60-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -715,6 +720,7 @@
   let dashClickGuardUntil = 0;
   let lastGoodPxAt = 0;
   let livePxHeld = false;
+  let sessionHighWater = {};
   let lastCaptureAt = 0;
   let captureBusy = false;
   let captureWaiters = [];
@@ -2828,11 +2834,19 @@
     if (!canon) return [];
     const bars = takeOtcBars(label);
     const bucket = Math.floor(Date.now() / CONFIG.barBucketMs);
+    /* 0.9.60: livePxHeld / OCR miss — do not skip the bucket. Ingest lastGoodPx if finite (same pair). Flat OK. */
+    if (livePxHeld || !ticks.length) {
+      if ((livePxHeld || lastGoodStillHeld()) && state.lastGoodPx != null && isFinite(state.lastGoodPx)) {
+        ticks = [state.lastGoodPx];
+      }
+    }
     for (let i = 0; i < ticks.length; i++) {
-      const px = ticks[i];
+      let px = ticks[i];
+      if (px == null || !isFinite(px)) {
+        if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) px = state.lastGoodPx;
+        else continue;
+      }
       if (px == null || !isFinite(px)) continue;
-      /* Do not ingest ticks that failed readLivePrice/ok() — garbage 0.50 must not enter bars. */
-      if (livePxHeld) continue;
       if (state.lastGoodPx != null && isFinite(state.lastGoodPx) && px < 1) {
         if (Math.abs(px - state.lastGoodPx) >= 0.05) continue;
       }
@@ -2848,6 +2862,11 @@
       }
     }
     if (bars.length > 120) assignOtcPairBars(canon, bars.slice(-120), true);
+    try {
+      const n1 = bars.filter(function (b) { return (b.n || 0) >= 1; }).length;
+      const prev = Number(sessionHighWater[canon]) || 0;
+      if (n1 > prev) sessionHighWater[canon] = n1;
+    } catch (_eHw) {}
     try { persistOtcBarsDebounced(); } catch (_eP) {}
     return state.otcBars[canon];
   }
@@ -2862,6 +2881,45 @@
 
   function barCount(label) {
     return takeOtcBars(label).length;
+  }
+
+  /* HUD / Auto gate: stored bars with n>=1 (not denseBars n>=3). minBarsForEma stays 21. */
+  function storedBarsN1(label) {
+    return takeOtcBars(label).filter(function (b) { return (b.n || 0) >= 1; });
+  }
+  function historyCount(label) {
+    const n = storedBarsN1(label).length;
+    label = sanePairLabel(label);
+    let canon = "";
+    try { canon = fxPairKey(label) || ""; } catch (_e) {}
+    if (!canon) return n;
+    const hw = Number(sessionHighWater[canon]) || 0;
+    if (n > hw) sessionHighWater[canon] = n;
+    return Number(sessionHighWater[canon]) || n;
+  }
+  function hudHistoryText(lab) {
+    lab = sanePairLabel(lab || "") || "";
+    const n = historyCount(lab);
+    let ck = "";
+    try { ck = fxPairKey(lab) || ""; } catch (_eK) {}
+    const restored = Number(otcBarsKeptPairs && otcBarsKeptPairs[ck]) || 0;
+    const kept = restored > 0 && n >= restored;
+    return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars");
+  }
+  function patchHudHistory(label) {
+    try {
+      if (!root || !root.querySelector) return;
+      const rows = root.querySelectorAll(".body > .row");
+      for (let i = 0; i < rows.length; i++) {
+        const span = rows[i].querySelector("span");
+        const b = rows[i].querySelector("b");
+        if (!span || !b) continue;
+        if (String(span.textContent || "").trim() === "History") {
+          b.textContent = hudHistoryText(label);
+          return;
+        }
+      }
+    } catch (_eH) {}
   }
 
   function labelFromText(raw) {
@@ -3088,8 +3146,9 @@
     onPairChange(label);
     const px = readLivePrice(label);
     if (px == null) {
-      if (lastGoodStillHeld()) {
+      if (lastGoodStillHeld() && state.lastGoodPx != null && isFinite(state.lastGoodPx)) {
         state.lastPx = fmtPx(state.lastGoodPx, label);
+        ingestTicks(label, [state.lastGoodPx]);
         return;
       }
       state.lastPx = "—";
@@ -5379,7 +5438,7 @@
         log("Staying on this chart: " + sessionChartPair);
         return { ok: false, error: "Staying on this chart" };
       }
-      const nBars = denseBars(labClick).length;
+      const nBars = storedBarsN1(labClick).length;
       if (nBars < CONFIG.minBarsForEma) {
         log("Need " + CONFIG.minBarsForEma + " bars, stored " + nBars);
         return { ok: false, error: "Need " + CONFIG.minBarsForEma + " bars, stored " + nBars };
@@ -5445,7 +5504,7 @@
       if (sessionAuto && state.auto) {
         let lab2 = "";
         try { lab2 = visiblePair() || ""; } catch (_eV2) { lab2 = ""; }
-        const n2 = denseBars(lab2).length;
+        const n2 = storedBarsN1(lab2).length;
         if (!lab2 || n2 < CONFIG.minBarsForEma) {
           clickLock = false;
           clickLockAt = 0;
@@ -5572,7 +5631,7 @@
       if (lastPx != null) state.lastPx = fmtPx(lastPx, p.label);
       else if (!state.lastPx) state.lastPx = "—";
 
-      const hist = denseBars(p.label);
+      const hist = storedBarsN1(p.label);
       let d;
       if (hist.length >= CONFIG.minBarsForEma) {
         const raw = decide(hist[hist.length - 1], hist.map(function (b) { return b.close; }));
@@ -5945,7 +6004,7 @@
       const st = (state.pairStats && state.pairStats[p.label]) || {};
       const sig = st.signal || "—";
       const cls = sig === "CALL" ? "call" : sig === "PUT" ? "put" : "skip";
-      const nbar = denseBars(p.label).length;
+      const nbar = historyCount(p.label);
       return "<tr><td>" + esc(p.label) + "</td><td>" + esc(st.px || "—") + "</td><td>" + nbar + "/21</td><td class=\"" + cls + "\">" + esc(sig) + "</td><td>" + esc(st.reason || "—") + "</td></tr>";
     }).join("");
     settlePendingJournal();
@@ -5980,6 +6039,11 @@
         if (!span || !b) continue;
         const k = String(span.textContent || "").trim();
         if (k === "OTC price") b.textContent = state.lastPx || "—";
+        else if (k === "History") {
+          let lab = "";
+          try { lab = visiblePair() || ""; } catch (_eH) {}
+          b.textContent = hudHistoryText(sanePairLabel(lab || state.lastPair) || "");
+        }
         else if (k === "Auto") b.textContent = state.auto ? ("ON " + state.autoCount + "/" + MAX_AUTO) : "OFF";
         else if (k === "Pair") {
           let v = "";
@@ -6021,7 +6085,7 @@
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
         <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return sanePairLabel(v || state.lastPair || snap.asset) || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = sanePairLabel(lab || state.lastPair || snap.asset) || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const restored = Number(otcBarsKeptPairs && otcBarsKeptPairs[ck]) || 0; const kept = restored > 0 && n >= restored; return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = sanePairLabel(lab || state.lastPair || snap.asset) || ""; return hudHistoryText(lab); })()}</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>Trade</span><b>${hudTradeText()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
@@ -6298,12 +6362,14 @@
     const miss = { axis: 0, cand: 0 };
     const px = readLivePrice(label, miss);
     if (px == null) {
-      if (lastGoodStillHeld()) {
+      if (lastGoodStillHeld() && state.lastGoodPx != null && isFinite(state.lastGoodPx)) {
         state.lastPx = fmtPx(state.lastGoodPx, label);
+        ingestTicks(label, [state.lastGoodPx]);
         if (root && root.isConnected) {
           const row = root.querySelectorAll(".row b")[3];
           if (row) row.textContent = state.lastPx;
         }
+        patchHudHistory(label);
         logCanvasMiss();
         return;
       }
@@ -6316,9 +6382,10 @@
       logCanvasMiss();
       return;
     }
+    ingestTicks(label, [px]);
+    patchHudHistory(label);
     if (px === lastObservedPx) return;
     lastObservedPx = px;
-    ingestTicks(label, [px]);
     state.lastPx = fmtPx(px, label);
     notePair(label, { px: String(px), bars: barCount(label) });
     if (root && root.isConnected) {
@@ -6539,7 +6606,9 @@
     else {
       let waitSig = "";
       try { if (realTradeOpenNow()) waitSig = "w" + String(tradeWaitSec()); } catch (_eW) {}
-      const sig = String(state.lastPx) + "\0" + String(state.lastPair) + "\0" + waitSig + "\0" + String(state.lastReason || "");
+      let histSig = "";
+      try { histSig = String(historyCount(visiblePair() || state.lastPair)); } catch (_eH) {}
+      const sig = String(state.lastPx) + "\0" + String(state.lastPair) + "\0" + waitSig + "\0" + String(state.lastReason || "") + "\0" + histSig;
       if (sig === lastHudSig) return;
       lastHudSig = sig;
       render();

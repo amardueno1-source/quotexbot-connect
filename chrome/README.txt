@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.59-ext
+quotexbot Chrome MV3 extension  v0.9.60-ext
 =======================================
 
 Load unpacked
@@ -29,12 +29,12 @@ reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
 Never treat the Time widget + Investment field as an open trade.
 Pending journal is not an open trade after Trades=0. Auto takes the next
 signal once the last trade expires (small 2–3s gap OK).
-Auto NEVER clicks if denseBars < 21 (hard gate on the Up/Down click).
+Auto NEVER clicks if stored bars n>=1 < 21 (hard gate on the Up/Down click).
 Stay on the already-open chart. Never click another pair tab/row.
 If (i) opens the asset list or changes the pair: close it and ban further (i).
 Up/Down scrape click only when getSeconds()<=4 (fail closed). No Time/SWITCH
 TIME inside clickDir. No 8s idle SWITCH TIME retry.
-Auto skips until 21 dense bars (no 2-tick CALL). USD/BRL 0.14–0.32.
+Auto skips until 21 stored bars n>=1 (no 2-tick CALL). USD/BRL 0.14–0.32.
 Price Now must pass ok() on the first tick (no lastGoodPx-null bypass).
 
 Live price: Price Now first (Pair Information panel quote). Skip screenshot
@@ -65,3 +65,7 @@ Trade HUD only while journal is open (settled/SKIP → —).
 Account net is sum of settled journal pnl (win +, loss −stake).
 OCR junk pairs (CGI/CHA) are ignored: not a pair change, not a History key.
 HUD keeps lastGood price up to 60s on the same chart (no invented price).
+History does not fall while idle: OCR miss / livePxHeld still ingest lastGoodPx
+(flat OK). HUD and Auto/clickDir 21-bar gate count stored bars n>=1, not
+denseBars n>=3. minBarsForEma stays 21. sessionHighWater per pair is monotonic
+this session except a real pair change.
