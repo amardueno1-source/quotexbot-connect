@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.54-ext)
+ * quotexbot Chrome MV3 content script (v0.9.55-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -595,7 +595,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.54-ext",
+    version: "0.9.55-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -640,7 +640,7 @@
       "NZD/USD": [0.50, 0.62],
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
-      "USD/ARS": [200, 5000],
+      "USD/ARS": [800, 2500],
       "CAD/CHF": [0.40, 0.90],
     },
     watch: [
@@ -1334,23 +1334,50 @@
     return hits[0];
   }
 
-  function parsePriceNowNumber(raw) {
+  /* Payout % / payout amount (80–400) vs thousands FX (ARS/COP). Never treat as live price. */
+  function looksLikePayoutNotPrice(v, range) {
+    return !!(range && range.lo >= 500 && v >= 80 && v <= 400);
+  }
+
+  function parsePriceNowNumber(raw, range) {
     const str = String(raw || "").replace(/(\d),(\d)/g, "$1.$2");
     if (!str) return null;
+    if (!range) {
+      try {
+        const pairLab = (typeof visiblePair === "function" ? visiblePair() : null) || lastSeenPair || (state && state.lastPair) || "";
+        if (pairLab) range = priceRange(pairLab);
+      } catch (_eR) {}
+    }
     const re = /(\d{1,6}\.\d{1,6})/g;
+    const found = [];
     let m;
     while ((m = re.exec(str))) {
       const i = m.index, e = i + m[1].length;
       const before = str.slice(Math.max(0, i - 3), i);
-      const after = str.slice(e, e + 4);
-      if (/[%$€]/.test(after) || /[%$€+]/.test(before)) continue;
-      if (/[+\-]/.test(str.charAt(i - 1) || "")) continue;
+      const after = str.slice(e, e + 8);
+      /* Skip this number if % follows it. Do not let a prior "201.86%" poison 1618 via before-window. */
+      if (/[%$€]/.test(after) || /^\s*%/.test(after)) continue;
+      if (/[$€+]/.test(before)) continue;
+      if (/[+\-]/.test(str.charAt(i - 1) || "") || /%/.test(str.charAt(i - 1) || "")) continue;
       if (/^\.\d/.test(after)) continue;
       if (/^\s*min\b/i.test(after)) continue;
       const v = parseFloat(m[1]);
-      if (isFinite(v) && v >= 0.05 && v < 1000000) return v;
+      if (isFinite(v) && v >= 0.05 && v < 1000000) found.push(v);
     }
-    return null;
+    if (!found.length) return null;
+    let pick = found.slice();
+    if (range && range.lo >= 500) {
+      pick = pick.filter(function (v) { return !looksLikePayoutNotPrice(v, range); });
+    } else if (found.some(function (v) { return v >= 800; })) {
+      /* No range / wide range: skip 80–400 payout when a thousands-FX candidate exists. */
+      pick = pick.filter(function (v) { return !(v >= 80 && v <= 400); });
+    }
+    if (!pick.length) pick = found;
+    if (range) {
+      const inR = pick.filter(function (v) { return v >= range.lo && v <= range.hi; });
+      if (inR.length) pick = inR;
+    }
+    return pick[0];
   }
 
   function nodeText(el) {
@@ -1571,6 +1598,8 @@
         const dp = m[1].split(".")[1].length;
         const v = parseFloat(m[1]);
         if (!isFinite(v) || v < 0.05 || v >= 1000000) continue;
+        if (looksLikePayoutNotPrice(v, range)) continue;
+        if (/payout|profit|invest/i.test(str) && v >= 80 && v <= 400 && range.lo >= 500) continue;
         cands.push({ v: v, dp: dp, el: el || bestPanel, text: m[1] });
       }
     }
@@ -1591,11 +1620,14 @@
     if (!cands.length) return null;
     function score(c) {
       let sc = 0;
+      const rangeIsMid = range.lo >= 50 && range.hi <= 500;
       if (c.dp >= 4 && c.dp <= 6) sc += 50;
-      else if (c.v >= 80 && c.v <= 400 && c.dp >= 2 && c.dp <= 3) sc += 45;
+      else if (rangeIsMid && c.v >= 80 && c.v <= 400 && c.dp >= 2 && c.dp <= 3) sc += 45;
       else if (c.dp === 3) sc += 8;
       if (c.v >= range.lo && c.v <= range.hi) sc += 80;
       if (c.v >= 0.9 && c.v <= 1.25 && c.dp >= 4) sc += 20;
+      /* Two in-range: prefer the one NOT in 80–400 when pair is thousands FX (ARS/COP). */
+      if (range.lo >= 500 && c.v >= range.lo && c.v <= range.hi && !(c.v >= 80 && c.v <= 400)) sc += 25;
       return sc;
     }
     cands.sort(function (a, b) { return score(b) - score(a); });
@@ -2237,6 +2269,7 @@
     }
     function ok(v, info) {
       if (v == null || !isFinite(v)) return false;
+      if (looksLikePayoutNotPrice(v, range)) return false;
       if (v < range.lo || v > range.hi) return false;
       if (isPnlNumber(v)) return false;
       if (isFrozenQuote(v) && state.lastGoodPx != null && Math.abs(v - state.lastGoodPx) > 1e-9) return false;
@@ -2250,8 +2283,9 @@
       /* FX like NZD/USD is 5 dp (0.58105). 1.13515 (5 dp) must pass. 0.609 is 3 dp OCR garbage.
          First tick (lastGoodPx == null) must also have dec>=4 when v<2. */
       if (v < 2 && dec < 4) return false;
-      /* USD/DZD ~245 and JPY/PKR/BDT/ARS: 2–3 dp on 80–400 (3 integer digits) is real, not OCR junk. */
-      const midOtc = v >= 80 && v <= 400 && dec >= 2 && dec <= 3;
+      /* mid-OTC first-tick bypass ONLY when the pair range itself is mid (DZD/PKR/BDT/JPY-like). NEVER USD/ARS. */
+      const rangeIsMidOtc = range.lo >= 50 && range.hi <= 500;
+      const midOtc = rangeIsMidOtc && v >= 80 && v <= 400 && dec >= 2 && dec <= 3;
       if (midOtc && v >= range.lo && v <= range.hi) {
         if (state.lastGoodPx == null) return true;
         const lastMid = state.lastGoodPx >= 80 && state.lastGoodPx <= 400;
@@ -2260,7 +2294,14 @@
       if (state.lastGoodPx != null) {
         const abs = Math.abs(v - state.lastGoodPx);
         const rel = abs / Math.max(Math.abs(state.lastGoodPx), 1e-6);
-        /* Never accept a >1% jump vs lastGoodPx (no tenths exception: 0.20→0.42 must fail). */
+        /* Poison recovery: lastGood is leftover payout 80–400; real pair price is in range. */
+        if (rel > 0.01 &&
+            state.lastGoodPx >= 80 && state.lastGoodPx <= 400 &&
+            range.lo >= 500 &&
+            v >= range.lo && v <= range.hi) {
+          return true;
+        }
+        /* Never accept a >1% jump vs lastGoodPx once lastGood is a real in-range price. */
         if (rel > 0.01) return false;
       }
       return true;
@@ -2273,6 +2314,7 @@
     }
     function holdLivePx() {
       if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
+        if (looksLikePayoutNotPrice(state.lastGoodPx, range)) return null;
         return state.lastGoodPx;
       }
       return null;
@@ -2294,7 +2336,9 @@
         }
       }
     }
-    if (pn && pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) {
+    if (pn && pn.v != null && isFinite(pn.v) && looksLikePayoutNotPrice(pn.v, range)) {
+      /* Payout 80–400 vs thousands FX: do not acceptLivePx; fall through to canvas OCR / cyan tag. */
+    } else if (pn && pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi) {
       rememberQuotes([pn.v]);
       /* Frozen Price Now (same v >7s): do not return it; OCR the cyan tag. */
       if (isFrozenQuote(pn.v)) {
@@ -2306,7 +2350,7 @@
     }
     /* popupOpen with no Price Now number: fall through to canvas OCR / cyan tag. */
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
-      return state.lastGoodPx;
+      if (!looksLikePayoutNotPrice(state.lastGoodPx, range)) return state.lastGoodPx;
     }
     /* (b) last canvas-OCR value if fresh (<15s HUD hold) and ok(range) */
     if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
