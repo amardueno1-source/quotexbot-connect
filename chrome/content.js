@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.55-ext)
+ * quotexbot Chrome MV3 content script (v0.9.56-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -55,6 +55,11 @@
  * wait the remainder of ~1500ms. Do not queue captureVisibleTab while busy.
  * HUD may hold lastGoodPx 15s (no dash flash). Auto still requires a live
  * quote (OCR or Price Now) younger than 2s.
+ * 0.9.56: never wipe otcBars on version bump; persist and key by fxPairKey
+ * so CAD/CHF vs CAD/CHF (OTC) share history. If Price Now disagrees with the
+ * cyan tag or fresh canvas OCR by rel>0.005, prefer tag/OCR (never payout).
+ * Poison lastGood recovers when a new in-range v matches canvas/tag.
+ * filterGarbageTicks prefers a tick cluster over a poisoned lastGood.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -595,7 +600,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.55-ext",
+    version: "0.9.56-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -704,6 +709,7 @@
   function saveState(st) {
     try {
       const payload = Object.assign({}, st, { auto: false });
+      if (!payload.otcBars || typeof payload.otcBars !== "object") payload.otcBars = (st && st.otcBars) || {};
       if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(payload.lastReason || ""))) {
         payload.lastReason = "";
       }
@@ -719,6 +725,7 @@
   if (!Array.isArray(state.logs)) state.logs = [];
   if (!state.pairStats || typeof state.pairStats !== "object") state.pairStats = {};
   if (!Array.isArray(state.journal)) state.journal = [];
+  if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
   if (Array.isArray(state.journal)) {
     for (let ji = 0; ji < state.journal.length; ji++) {
       const jr = state.journal[ji];
@@ -736,7 +743,7 @@
     state.logs = [];
     state.lastReason = "";
     state.lastPair = "—";
-    state.otcBars = {};
+    /* 0.9.56: do NOT clear otcBars — keep bars across 0.9.55→0.9.56. */
     state.pairStats = {};
     state.hudWin = null;
     state.dashWin = null;
@@ -746,6 +753,16 @@
     lastGoodPxAt = 0;
     try { saveState(state); } catch (_e) {}
   }
+  let otcBarsKept = false;
+  try {
+    const bk = Object.keys(state.otcBars || {});
+    for (let bi = 0; bi < bk.length; bi++) {
+      if (Array.isArray(state.otcBars[bk[bi]]) && state.otcBars[bk[bi]].length > 0) {
+        otcBarsKept = true;
+        break;
+      }
+    }
+  } catch (_eKept) {}
   state.lastPx = "—";
   state.lastGoodPx = null;
   lastGoodPxAt = 0;
@@ -2301,6 +2318,24 @@
             v >= range.lo && v <= range.hi) {
           return true;
         }
+        /* 0.9.56: lastGood poisoned vs a new in-range v that matches canvas/tag. */
+        if (rel > 0.01 && v >= range.lo && v <= range.hi && !looksLikePayoutNotPrice(v, range)) {
+          let matched = false;
+          if (lastCanvasOcr && lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
+            const rO = Math.abs(v - lastCanvasOcr.v) / Math.max(Math.abs(v), Math.abs(lastCanvasOcr.v), 1e-6);
+            if (rO <= 0.005) matched = true;
+          }
+          if (!matched) {
+            try {
+              const tg = readLiveTagByHit();
+              if (tg && tg.v != null && isFinite(tg.v) && !looksLikePayoutNotPrice(tg.v, range)) {
+                const rT = Math.abs(v - tg.v) / Math.max(Math.abs(v), Math.abs(tg.v), 1e-6);
+                if (rT <= 0.005) matched = true;
+              }
+            } catch (_eM) {}
+          }
+          if (matched) return true;
+        }
         /* Never accept a >1% jump vs lastGoodPx once lastGood is a real in-range price. */
         if (rel > 0.01) return false;
       }
@@ -2344,6 +2379,26 @@
       if (isFrozenQuote(pn.v)) {
         /* fall through to canvas OCR / readLiveTagByHit */
       } else if (ok(pn.v, pn)) {
+        /* 0.9.56: if Price Now vs cyan tag / fresh OCR differ by rel>0.005, prefer tag/OCR. */
+        let prefer = null;
+        try {
+          const tg = readLiveTagByHit();
+          if (tg && tg.v != null && isFinite(tg.v)) {
+            const tv = correctOcr(tg.v, range, state.lastGoodPx);
+            if (tv >= range.lo && tv <= range.hi && !looksLikePayoutNotPrice(tv, range)) {
+              const rT = Math.abs(pn.v - tv) / Math.max(Math.abs(pn.v), Math.abs(tv), 1e-6);
+              if (rT > 0.005) prefer = tv;
+            }
+          }
+        } catch (_eC) {}
+        if (prefer == null && lastCanvasOcr && lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
+          const ocr = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
+          if (ocr != null && isFinite(ocr) && ocr >= range.lo && ocr <= range.hi && !looksLikePayoutNotPrice(ocr, range)) {
+            const rO = Math.abs(pn.v - ocr) / Math.max(Math.abs(pn.v), Math.abs(ocr), 1e-6);
+            if (rO > 0.005) prefer = ocr;
+          }
+        }
+        if (prefer != null && ok(prefer)) return acceptLivePx(prefer);
         notePriceNowV(pn.v);
         return acceptLivePx(pn.v);
       }
@@ -2391,11 +2446,21 @@
       xs.push(px);
     }
     if (!xs.length) return [];
-    let ref;
-    if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) ref = state.lastGoodPx;
-    else {
-      const sorted = xs.slice().sort(function (a, b) { return a - b; });
-      ref = sorted[Math.floor(sorted.length / 2)];
+    const sorted = xs.slice().sort(function (a, b) { return a - b; });
+    const median = sorted[Math.floor(sorted.length / 2)];
+    let ref = median;
+    if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) {
+      const relMed = Math.abs(median - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6);
+      if (relMed <= 0.008) ref = state.lastGoodPx;
+      else {
+        /* lastGood disagrees with cluster: prefer median if more ticks sit there. */
+        let nMed = 0, nGood = 0;
+        for (let i = 0; i < xs.length; i++) {
+          if (Math.abs(xs[i] - median) / Math.max(Math.abs(median), 1e-6) <= 0.008) nMed++;
+          if (Math.abs(xs[i] - state.lastGoodPx) / Math.max(Math.abs(state.lastGoodPx), 1e-6) <= 0.008) nGood++;
+        }
+        ref = nMed > nGood ? median : state.lastGoodPx;
+      }
     }
     const out = [];
     for (let i = 0; i < xs.length; i++) {
@@ -2415,12 +2480,54 @@
     return filterGarbageTicks(ticks);
   }
 
+  function takeOtcBars(label) {
+    const canon = fxPairKey(label);
+    if (!canon) return [];
+    if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
+    const keys = Object.keys(state.otcBars);
+    const extra = [];
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== canon && fxPairKey(keys[i]) === canon) extra.push(keys[i]);
+    }
+    if (extra.length) {
+      const byM = {};
+      function addArr(arr) {
+        if (!Array.isArray(arr)) return;
+        for (let j = 0; j < arr.length; j++) {
+          const b = arr[j];
+          if (!b || b.m == null) continue;
+          if (!byM[b.m]) {
+            byM[b.m] = { m: b.m, t: b.t, open: b.open, high: b.high, low: b.low, close: b.close, n: b.n || 0 };
+          } else {
+            const d = byM[b.m];
+            if (b.high > d.high) d.high = b.high;
+            if (b.low < d.low) d.low = b.low;
+            d.close = b.close;
+            d.n = (d.n || 0) + (b.n || 0);
+          }
+        }
+      }
+      addArr(state.otcBars[canon]);
+      for (let i = 0; i < extra.length; i++) {
+        addArr(state.otcBars[extra[i]]);
+        delete state.otcBars[extra[i]];
+      }
+      const merged = [];
+      const ms = Object.keys(byM);
+      for (let i = 0; i < ms.length; i++) merged.push(byM[ms[i]]);
+      merged.sort(function (a, b) { return a.m - b.m; });
+      state.otcBars[canon] = merged.length > 120 ? merged.slice(-120) : merged;
+    }
+    if (!Array.isArray(state.otcBars[canon])) state.otcBars[canon] = [];
+    return state.otcBars[canon];
+  }
+
   function ingestTicks(label, ticks) {
     ticks = filterGarbageTicks(ticks);
     if (!label || label === "—") return [];
-    if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
-    if (!Array.isArray(state.otcBars[label])) state.otcBars[label] = [];
-    const bars = state.otcBars[label];
+    const canon = fxPairKey(label);
+    if (!canon) return [];
+    const bars = takeOtcBars(label);
     const bucket = Math.floor(Date.now() / CONFIG.barBucketMs);
     for (let i = 0; i < ticks.length; i++) {
       const px = ticks[i];
@@ -2435,17 +2542,17 @@
         bar.n = (bar.n || 1) + 1;
       }
     }
-    if (bars.length > 120) state.otcBars[label] = bars.slice(-120);
-    return state.otcBars[label];
+    if (bars.length > 120) state.otcBars[canon] = bars.slice(-120);
+    return state.otcBars[canon];
   }
 
   function denseBars(label) {
-    const bars = (state.otcBars && state.otcBars[label]) || [];
+    const bars = takeOtcBars(label);
     return bars.filter(function (b) { return (b.n || 0) >= 3 && (b.high - b.low) > 0; });
   }
 
   function barCount(label) {
-    return ((state.otcBars && state.otcBars[label]) || []).length;
+    return takeOtcBars(label).length;
   }
 
   function labelFromText(raw) {
@@ -5569,7 +5676,7 @@
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
         <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; return denseBars(lab).length; })()}/${CONFIG.minBarsForEma} bars · saved</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; return n + "/" + CONFIG.minBarsForEma + (otcBarsKept ? " bars · kept" : " bars"); })()}</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>

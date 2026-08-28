@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.55-ext
+quotexbot Chrome MV3 extension  v0.9.56-ext
 =======================================
 
 Load unpacked
@@ -49,3 +49,8 @@ not retry. Else screenshot, crop the chart-canvas right-edge cyan/blue
 last-price pill (~3x), Tesseract.js OCR offscreen. Capture waits for the
 previous OCR, then ~1500ms. After SWITCH TIME, press Escape so the
 duration list does not stay open.
+
+otcBars persist across reloads and version bumps (not wiped on 0.9.56).
+History HUD says "bars · kept" only when storage actually restored bars.
+If Price Now disagrees with the cyan last-price pill (or fresh canvas OCR)
+by more than 0.5%, HUD follows the cyan tag. Payout is never live price.
