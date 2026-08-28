@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.50-ext
+quotexbot Chrome MV3 extension  v0.9.51-ext
 =======================================
 
 Load unpacked
@@ -16,6 +16,10 @@ DEMO only. Visible DOM. No cookies / SSID / unofficial APIs.
 Stay on the open chart. Auto clicks Up/Down on DEMO only.
 Auto ON only from a trusted Start auto click this session.
 Dashboard / mini / restore clicks must not start Auto.
+HUD Up / Dashboard must not start Auto.
+Switch Time with realishClick (not el.click()). If Time stays wall-clock, skip
+the trade. Enter only at 1m candle open (remaining 00:57–00:60). Mid-candle
+00:08–00:56 logs Wait candle open and does not click Up/Down.
 One open trade at a time. Skip Up/Down only if Trades badge ≥ 1, this-session
 reserved balance, or a trades-list row (pair + CALL|PUT|Up|Down + $ + MM:SS).
 Never treat the Time widget + Investment field as an open trade.

@@ -1,8 +1,14 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.50-ext)
+ * quotexbot Chrome MV3 content script (v0.9.51-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * DEMO-only Up/Down clicks. Stay on the open chart.
+ * Switch Time with realishClick (pointerdown/up), not el.click(). If Time is
+ * still wall-clock after retries, skip the trade — do not click Up/Down.
+ * HUD Up/Down must not start Auto (dashClickGuard + clearAutoArm).
+ * Enter only in the first ~3s of a 1m candle (remaining 00:57–00:60, or a new HH:MM).
+ * Mid-candle 00:08–00:56: log Wait candle open, do not click Up/Down. Last ~8s still skip.
+ * Auto decides from stored bars — never 4s sampleOtc immediately before the open click.
  * Dashboard / mini / restore clicks return immediately and must not start Auto.
  * Start auto only from a trusted click on the same Start auto button that
  * received pointerdown. Skip full HUD innerHTML rebuild while pointer is down.
@@ -569,7 +575,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.50-ext",
+    version: "0.9.51-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -772,6 +778,10 @@
   let pendingLockClearedLogged = false;
   let staleBusyCleared = false;
   let durationEnsuredOnce = false;
+  let lastDurationEnsureAt = 0;
+  let lastWaitCandleLogAt = 0;
+  let candleOpenTimer = 0;
+  let pendingCandleDir = "";
   let scanning = false;
   try {
     if (state.lastReason && /trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(state.lastReason))) {
@@ -2684,6 +2694,26 @@
     if (isHudControlText(t)) return false;
     return true;
   }
+  function clickableAncestor(el) {
+    let n = el;
+    for (let i = 0; i < 6 && n; i++) {
+      try {
+        const tag = (n.tagName || "").toUpperCase();
+        const role = (n.getAttribute && n.getAttribute("role")) || "";
+        if (tag === "BUTTON" || tag === "A" || role === "button") return n;
+      } catch (_e) {}
+      n = n.parentElement;
+    }
+    return el;
+  }
+  function realishClickPlatform(el) {
+    if (!el) return false;
+    let target = el;
+    try { target = clickableAncestor(el) || el; } catch (_e0) { target = el; }
+    if (!canClickPlatform(target)) return false;
+    try { realishClick(target); } catch (_e1) { return false; }
+    return true;
+  }
   function platformClick(el) {
     if (!canClickPlatform(el)) return false;
     botSyntheticClick = true;
@@ -3458,6 +3488,7 @@
     return "1m";
   }
   function readExpiryLabel() {
+    try { if (typeof timeIsClockMode === "function" && timeIsClockMode()) return ""; } catch (_eClk) {}
     const hud = document.getElementById("quotexbot-hud");
     const dashEl = document.getElementById("quotexbot-dash");
     const re = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
@@ -3507,6 +3538,7 @@
       if (TF_MS[tf]) return tf;
     } catch (_e0) {}
     if (best && TF_MS[best]) return best;
+    try { if (typeof timeIsClockMode === "function" && timeIsClockMode()) return ""; } catch (_eClk2) {}
     return "1m";
   }
   function readExpiryMs() {
@@ -4037,6 +4069,109 @@
     if (/^00:\d{2}(:\d{2})?$/.test(t)) return true;
     return false;
   }
+  function parseDurationRemainSec(raw) {
+    const t = String(raw || "").replace(/\s+/g, "");
+    if (!t) return null;
+    const low = t.toLowerCase();
+    if (TF_MS[low]) return null;
+    const hms = t.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+    if (hms) {
+      const hh = +hms[1], mm = +hms[2], ss = +hms[3];
+      if (hh !== 0) return null;
+      if (mm === 1 && ss === 0) return 60;
+      if (mm === 0 && ss >= 0 && ss <= 60) return ss;
+      return null;
+    }
+    const hm = t.match(/^00:(\d{2})$/);
+    if (hm) {
+      const n = +hm[1];
+      if (n >= 0 && n <= 60) return n;
+    }
+    return null;
+  }
+  function wallCandleRemainSec() {
+    const d = new Date();
+    const sec = d.getSeconds();
+    if (sec === 0) return 60;
+    return 60 - sec;
+  }
+  function readChartTimerRemainSec() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("span, div, b, label, p, time");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e0) {}
+    let best = null, bestLen = 1e9;
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
+      if (!r || r.left < wide * 0.45 || r.top < 80 || r.height >= 48 || r.width < 4) continue;
+      const t = widgetText(el);
+      if (!t || t.length > 12) continue;
+      const raw = t.replace(/\s+/g, "");
+      const sec = parseDurationRemainSec(raw);
+      if (sec == null || sec < 0 || sec > 60) continue;
+      if (raw.length < bestLen) { best = sec; bestLen = raw.length; }
+    }
+    return best;
+  }
+  function candleRemainSec() {
+    try {
+      const raw = String(readTimeWidgetValue() || "").replace(/\s+/g, "");
+      const fromTime = parseDurationRemainSec(raw);
+      if (fromTime != null && fromTime >= 0 && fromTime <= 60) return fromTime;
+    } catch (_e0) {}
+    try {
+      const chart = readChartTimerRemainSec();
+      if (chart != null && chart >= 0 && chart <= 60) return chart;
+    } catch (_e1) {}
+    return wallCandleRemainSec();
+  }
+  function atCandleOpenWindow() {
+    let rem = null;
+    try { rem = candleRemainSec(); } catch (_e) { rem = null; }
+    if (rem != null && rem >= 57 && rem <= 60) return true;
+    if (rem != null && rem >= 1 && rem <= 56) return false;
+    try {
+      const sec = new Date().getSeconds();
+      if (sec <= 3) return true;
+    } catch (_e2) {}
+    return false;
+  }
+  function midCandleRemain() {
+    let rem = null;
+    try { rem = candleRemainSec(); } catch (_e) { rem = null; }
+    if (rem != null && rem >= 8 && rem <= 56) return true;
+    if (rem != null && (rem >= 57 || rem <= 7)) return false;
+    try {
+      const sec = new Date().getSeconds();
+      if (sec >= 4 && sec <= 52) return true;
+    } catch (_e2) {}
+    return false;
+  }
+  function candleTooClose() {
+    try {
+      if (atCandleOpenWindow()) return false;
+    } catch (_e0) {}
+    let rem = null;
+    try { rem = candleRemainSec(); } catch (_e1) { rem = null; }
+    if (rem != null && rem > 0 && rem <= 8) return true;
+    try {
+      const sec = new Date().getSeconds();
+      if (sec >= 52 && sec <= 59) return true;
+    } catch (_e2) {}
+    return false;
+  }
   function dismissTimeDropdown() {
     try {
       const opts = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true, view: window };
@@ -4049,9 +4184,17 @@
       try { window.dispatchEvent(new KeyboardEvent("keyup", opts)); } catch (_eW2) {}
     } catch (_e0) {}
   }
+  function isSwitchTimeText(t) {
+    const s = String(t || "").replace(/\s+/g, " ").trim();
+    if (!s) return false;
+    if (/^switch\s*time$/i.test(s)) return true;
+    if (/^cambiar\s*(hora|tiempo)$/i.test(s)) return true;
+    if (/^(mudar|alternar)\s*(hora|tempo)$/i.test(s)) return true;
+    if (/^(переключить|сменить)\s*время$/i.test(s)) return true;
+    if (/^সময়\s*(পরিবর্তন|বদলান)$/.test(s)) return true;
+    return false;
+  }
   function clickSwitchTime() {
-    const hud = document.getElementById("quotexbot-hud");
-    const dashEl = document.getElementById("quotexbot-dash");
     const nodes = [];
     try {
       forEachRoot(function (root) {
@@ -4061,35 +4204,38 @@
         } catch (_eN) {}
       });
     } catch (_e0) {}
-    let best = null, bestLen = 1e9;
+    const wide = window.innerWidth || 1200;
+    let best = null, bestLen = 1e9, exact = null, exactLen = 1e9;
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       if (!canClickPlatform(el)) continue;
       const t = widgetText(el);
-      if (!t || t.length > 48) continue;
+      if (!t || t.length >= 24) continue;
       if (isHudControlText(t)) continue;
       if (/\bpending\s*trade\b/i.test(t) || /\bpending\b/i.test(t)) continue;
-      if (!/switch\s*time/i.test(t)) continue;
+      if (!isSwitchTimeText(t)) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
       if (!r || r.width < 6 || r.height < 6) continue;
+      if (r.left <= wide * 0.45 || r.top <= 80) continue;
+      if (r.height >= 48) continue;
       if (t.length < bestLen) { best = el; bestLen = t.length; }
+      if (/^switch\s*time$/i.test(t) && t.length < exactLen) { exact = el; exactLen = t.length; }
     }
-    if (!best || !canClickPlatform(best)) return false;
-    if (!platformClick(best)) return false;
+    const pick = exact || best;
+    if (!pick || !canClickPlatform(pick)) return false;
+    if (!realishClickPlatform(pick)) return false;
     log("SWITCH TIME → duration");
     return true;
   }
   function clickDurationChip(want) {
     const need = String(want || "1m").toLowerCase();
-    const hud = document.getElementById("quotexbot-hud");
-    const dashEl = document.getElementById("quotexbot-dash");
     const re = /^(5s|10s|15s|30s|1m|2m|3m|5m|10m|15m|30m|1h)$/i;
     const nodes = [];
     try {
       forEachRoot(function (root) {
         try {
-          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, b");
+          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, b, li");
           for (let i = 0; i < list.length; i++) nodes.push(list[i]);
         } catch (_eN) {}
       });
@@ -4104,40 +4250,93 @@
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e1) { continue; }
       if (!r || r.width < 4 || r.height < 4) continue;
-      const score = (r.left > wide * 0.5 ? 80 : 0) - r.top;
+      let score = (r.left > wide * 0.45 ? 120 : 0) - r.top;
+      try {
+        let p = el;
+        for (let k = 0; k < 6 && p; k++) {
+          const role = (p.getAttribute && p.getAttribute("role")) || "";
+          const tag = (p.tagName || "").toUpperCase();
+          if (role === "listbox" || role === "menu" || role === "dialog" || tag === "UL" || tag === "OL") {
+            score += 200;
+            break;
+          }
+          p = p.parentElement;
+        }
+      } catch (_eP) {}
       if (score > bestScore) { bestScore = score; best = el; }
     }
     if (!best || !canClickPlatform(best)) return false;
-    if (!platformClick(best)) return false;
+    if (!realishClickPlatform(best)) return false;
     return true;
+  }
+  function findTimeWidgetClockEl() {
+    const hud = document.getElementById("quotexbot-hud");
+    const dashEl = document.getElementById("quotexbot-dash");
+    const wide = window.innerWidth || 1200;
+    const nodes = [];
+    try {
+      forEachRoot(function (root) {
+        try {
+          const list = root.querySelectorAll("button, [role='button'], a, span, div, label, p, b, input");
+          for (let i = 0; i < list.length; i++) nodes.push(list[i]);
+        } catch (_eN) {}
+      });
+    } catch (_e1) {}
+    let best = null, bestLen = 1e9;
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (hud && (el === hud || (hud.contains && hud.contains(el)))) continue;
+      if (dashEl && (el === dashEl || (dashEl.contains && dashEl.contains(el)))) continue;
+      if (!canClickPlatform(el)) continue;
+      let r;
+      try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
+      if (!r || r.left < wide * 0.45 || r.top < 80 || r.width < 4 || r.height < 4) continue;
+      if (r.height >= 48) continue;
+      const t = widgetText(el);
+      if (!t || t.length > 24) continue;
+      const raw = t.replace(/\s+/g, "");
+      if (!isClockExpiryValue(raw)) continue;
+      if (raw.length < bestLen) { best = el; bestLen = raw.length; }
+    }
+    return best;
   }
   async function ensureDurationMode() {
     let raw = "";
     try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR) { raw = ""; }
     if (timeLooksDuration(raw)) {
       durationEnsuredOnce = true;
-      return;
+      return true;
     }
     let clock = false;
     try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
-    if (!clock) return;
-    const switched = clickSwitchTime();
-    if (switched) await sleep(350);
-    if (!clickDurationChip("1m") && switched) {
+    if (!clock) return false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { clickSwitchTime(); } catch (_eSw) {}
+      await sleep(400);
+      try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR2) { raw = ""; }
+      if (timeLooksDuration(raw)) {
+        durationEnsuredOnce = true;
+        log("Time set to 1m");
+        try { dismissTimeDropdown(); } catch (_eD0) {}
+        return true;
+      }
       try {
-        if (scrape && typeof scrape.findLabeledInput === "function" && typeof scrape.setControlValue === "function") {
-          const el = scrape.findLabeledInput(document, /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i);
-          if (el) scrape.setControlValue(el, "00:01:00");
-        }
-      } catch (_e1) {}
+        const clockEl = findTimeWidgetClockEl();
+        if (clockEl) realishClickPlatform(clockEl);
+      } catch (_eClk) {}
+      await sleep(300);
+      try { clickDurationChip("1m"); } catch (_eCh) {}
+      await sleep(300);
+      try { dismissTimeDropdown(); } catch (_eD) {}
+      try { raw = String(readTimeWidgetValue() || "").replace(/\s+/g, ""); } catch (_eR3) { raw = ""; }
+      if (timeLooksDuration(raw)) {
+        durationEnsuredOnce = true;
+        log("Time set to 1m");
+        return true;
+      }
     }
-    if (switched) await sleep(150);
-    try { dismissTimeDropdown(); } catch (_eD) {}
-    if (switched) await sleep(80);
-    try {
-      const after = String(readTimeWidgetValue() || "").replace(/\s+/g, "");
-      if (timeLooksDuration(after)) durationEnsuredOnce = true;
-    } catch (_eA) {}
+    log("Time still clock, skip");
+    return false;
   }
   function platformHasOpenTrade() {
     /* Neutralized 0.9.48: Time widget 00:ss + Investment $ is NOT an open trade.
@@ -4443,8 +4642,56 @@
     let clock = false;
     try { clock = timeIsClockMode(); } catch (_e0) { clock = false; }
     if (!clock) return;
+    const now = Date.now();
+    if (lastDurationEnsureAt && (now - lastDurationEnsureAt) < 8000) return;
+    lastDurationEnsureAt = now;
     try { await ensureDurationMode(); } catch (_e2) {}
-    durationEnsuredOnce = true;
+  }
+  function clearCandleOpenArm() {
+    if (candleOpenTimer) {
+      try { clearTimeout(candleOpenTimer); } catch (_e) {}
+      candleOpenTimer = 0;
+    }
+    pendingCandleDir = "";
+  }
+  function msUntilCandleOpen() {
+    let rem = null;
+    try { rem = candleRemainSec(); } catch (_e0) { rem = null; }
+    if (rem != null && rem >= 57) return 0;
+    if (rem != null && rem >= 0 && rem < 57) return Math.max(50, rem * 1000 - 150);
+    try {
+      const d = new Date();
+      const sec = d.getSeconds();
+      const ms = d.getMilliseconds();
+      if (sec <= 3) return 0;
+      return Math.max(50, (60 - sec) * 1000 - ms - 120);
+    } catch (_e1) {}
+    return 1000;
+  }
+  function armCandleOpenClick(dir) {
+    pendingCandleDir = dir || pendingCandleDir || "up";
+    if (candleOpenTimer) return;
+    let waitMs = 1000;
+    try { waitMs = msUntilCandleOpen(); } catch (_e0) { waitMs = 1000; }
+    if (waitMs > 58000) waitMs = 58000;
+    if (waitMs < 50) waitMs = 50;
+    candleOpenTimer = setTimeout(function () {
+      candleOpenTimer = 0;
+      const dir2 = pendingCandleDir;
+      pendingCandleDir = "";
+      if (!sessionAuto || !state.auto) return;
+      if (!dir2) return;
+      try { if (realTradeOpenNow()) return; } catch (_e1) {}
+      let atOpen = false;
+      try { atOpen = atCandleOpenWindow(); } catch (_e2) { atOpen = false; }
+      if (!atOpen) {
+        let mid = false;
+        try { mid = midCandleRemain() || candleTooClose(); } catch (_e3) {}
+        if (mid) armCandleOpenClick(dir2);
+        return;
+      }
+      try { scanWatchlist(); } catch (_e4) {}
+    }, waitMs);
   }
 
   function snapDoc() {
@@ -4455,12 +4702,14 @@
     if (!r || !r.ok) return;
     const pos = dir === "down" ? "PUT" : "CALL";
     const pair = visiblePair() || lastSeenPair || (state.lastPair && state.lastPair !== "—" ? state.lastPair : "") || "—";
-    let durLabel = "1m";
+    let durLabel = "";
     let durMsVal = CONFIG.tradeMs || 60000;
-    try { durLabel = readExpiryLabel(); } catch (_d1) {}
-    try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
-    durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
-    durMsVal = tfToMs(durLabel);
+    try { durLabel = readExpiryLabel(); } catch (_d1) { durLabel = ""; }
+    if (durLabel) {
+      try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+      durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
+      durMsVal = tfToMs(durLabel);
+    }
     let fpAtClick = "";
     try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
     const px = state.lastPx != null && state.lastPx !== "" ? String(state.lastPx) : "—";
@@ -4517,25 +4766,49 @@
     if (snap.accountMode !== "demo" && !state.liveAck) return { ok: false, error: "live locked" };
     if (realTradeOpenNow() || tradeBusy()) return tradeOpenError();
     try { if (expiryTooClose()) { return tradeOpenError(); } } catch (_eEx) {}
+    try { if (candleTooClose()) { return tradeOpenError(); } } catch (_eCd) {}
+    try {
+      if (!atCandleOpenWindow()) {
+        log("Wait candle open");
+        return { ok: false, error: "Wait candle open", waitCandle: true };
+      }
+    } catch (_eOp0) {}
     /* Take the lock BEFORE any await so a second Up/Down cannot sneak in.
        Do not stamp lastClickAt until the actual Up/Down click (Dashboard/MM must not block). */
     clickLock = true;
     clickLockAt = Date.now();
     try {
       try { await ensureDurationMode(); } catch (_eDur) {}
+      let stillClock = false;
+      try { stillClock = timeIsClockMode(); } catch (_eClk) { stillClock = false; }
+      if (stillClock) {
+        clickLock = false;
+        clickLockAt = 0;
+        log("Time still clock, skip");
+        return { ok: false, error: "Time still clock, skip" };
+      }
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
       if (snap.accountMode === "demo") {
         try { await applyMoneyManagement(); } catch (_eMm) {}
       }
       if (realTradeOpenNow()) { clickLock = false; clickLockAt = 0; return tradeOpenError(); }
       try {
-        if (expiryTooClose()) {
+        if (expiryTooClose() || candleTooClose()) {
           clickLock = false;
           clickLockAt = 0;
           lastClickAt = 0;
           return tradeOpenError();
         }
       } catch (_eEx2) {}
+      try {
+        if (!atCandleOpenWindow()) {
+          clickLock = false;
+          clickLockAt = 0;
+          lastClickAt = 0;
+          log("Wait candle open");
+          return { ok: false, error: "Wait candle open", waitCandle: true };
+        }
+      } catch (_eOp1) {}
       capturePreClickMoney();
       if (lastMmAppliedStake != null) lastPreClickStake = lastMmAppliedStake;
       let fpBefore = "";
@@ -4647,20 +4920,10 @@
       log("Staying on this chart: " + p.label);
       saveState(state); render();
 
-      log("Reading OTC chart price: " + p.label);
-      const ticks = await sampleOtc(p.label);
-      ingestTicks(p.label, ticks);
-      const lastPx = ticks.length ? ticks[ticks.length - 1] : null;
-      if (lastPx != null) {
-        state.lastPx = fmtPx(lastPx, p.label);
-        log("OTC price " + p.label + " = " + state.lastPx + " · " + ticks.length + " tick");
-      } else if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
-        state.lastPx = fmtPx(state.lastGoodPx, p.label);
-        logCanvasMiss();
-      } else {
-        state.lastPx = "—";
-        logCanvasMiss();
-      }
+      let lastPx = null;
+      if (state.lastGoodPx != null && isFinite(state.lastGoodPx)) lastPx = state.lastGoodPx;
+      if (lastPx != null) state.lastPx = fmtPx(lastPx, p.label);
+      else if (!state.lastPx) state.lastPx = "—";
 
       const hist = denseBars(p.label);
       let d;
@@ -4679,24 +4942,42 @@
         signal: d.signal,
         reason: d.reason,
         bars: barCount(p.label),
-        ticks: ticks.length,
+        ticks: 0,
       });
       saveState(state); render(); renderDash();
 
-      if (d.signal !== "CALL" && d.signal !== "PUT") return;
+      if (d.signal !== "CALL" && d.signal !== "PUT") {
+        clearCandleOpenArm();
+        return;
+      }
       if (realTradeOpenNow()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
       try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx1) {}
-
-      await sleep(400 + Math.floor(Math.random() * 600));
-      if (realTradeOpenNow()) { const w = tradeWaitSec(); if (w > 2) log("Trade open, wait " + w + "s"); else log("Trade open, skip " + d.signal); return; }
-      try { if (expiryTooClose()) { const w = tradeWaitSec(); if (w > 2) { log("Trade open, wait " + w + "s"); return; } } } catch (_eEx2) {}
-      if (!(await waitForFreshOcr(1600))) {
-        state.lastReason = "Price stale, skip";
-        log("Price stale, skip");
+      const wantDir = d.signal === "PUT" ? "down" : "up";
+      try {
+        if (candleTooClose() || !atCandleOpenWindow()) {
+          const nowW = Date.now();
+          if (!lastWaitCandleLogAt || nowW - lastWaitCandleLogAt > 8000) {
+            lastWaitCandleLogAt = nowW;
+            log("Wait candle open");
+          }
+          state.lastReason = "Wait candle open";
+          armCandleOpenClick(wantDir);
+          saveState(state); render();
+          return;
+        }
+      } catch (_eCnd) {}
+      const r = await clickDir(wantDir);
+      if (r && /Wait candle open/i.test(String(r.error || ""))) {
+        state.lastReason = "Wait candle open";
+        armCandleOpenClick(wantDir);
         saveState(state); render();
         return;
       }
-      const r = await clickDir(d.signal === "PUT" ? "down" : "up");
+      if (r && /Time still clock/i.test(String(r.error || ""))) {
+        state.lastReason = "Time still clock, skip";
+        saveState(state); render();
+        return;
+      }
       if (r && /Trade open/.test(String(r.error || ""))) {
         const w = tradeWaitSec();
         if (w > 2) log("Trade open, wait " + w + "s");
@@ -4713,12 +4994,14 @@
         saveState(state); render(); renderDash();
         return;
       }
-      let durLabel = "1m";
+      let durLabel = "";
       let durMsVal = CONFIG.tradeMs || 60000;
-      try { durLabel = readExpiryLabel(); } catch (_d1) {}
-      try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
-      durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
-      durMsVal = tfToMs(durLabel);
+      try { durLabel = readExpiryLabel(); } catch (_d1) { durLabel = ""; }
+      if (durLabel) {
+        try { durMsVal = saneDurMs(readExpiryMs()); } catch (_d2) { durMsVal = tfToMs(durLabel); }
+        durLabel = fmtDur({ dur: durLabel, durMs: durMsVal });
+        durMsVal = tfToMs(durLabel);
+      }
       let fpAtClick = "";
       try { fpAtClick = tradesFingerprint(); } catch (_fp0) { fpAtClick = ""; }
       addJournal(Object.assign({
@@ -5144,6 +5427,8 @@
       return;
     }
     if (act === "up" || act === "down") {
+      dashClickGuardUntil = Date.now() + 1200;
+      clearAutoArm();
       if (realTradeOpenNow() || tradeBusy()) {
         const left = tradeWaitSec();
         const skip = "Trade open, skip " + (act === "down" ? "Down" : "Up");
@@ -5163,7 +5448,11 @@
       }
       (async function () {
         const r = await clickDir(act);
-        if (r && /Trade open/.test(String(r.error || ""))) {
+        if (r && /Wait candle open/i.test(String(r.error || ""))) {
+          state.lastReason = "Wait candle open";
+        } else if (r && /Time still clock/i.test(String(r.error || ""))) {
+          state.lastReason = "Time still clock, skip";
+        } else if (r && /Trade open/.test(String(r.error || ""))) {
           const left = tradeWaitSec();
           if (left > 2) {
             log("Trade open, wait " + left + "s");
@@ -5196,6 +5485,7 @@
         state.auto = false;
         sessionAuto = false;
         autoPtrArmedEl = null;
+        try { clearCandleOpenArm(); } catch (_eArmOff) {}
         log("Auto off");
       } else if (snap.accountMode !== "demo") {
         state.lastReason = "Auto off on live account";
@@ -5278,6 +5568,11 @@
       const act = actEl && actEl.getAttribute && actEl.getAttribute("data-act");
       if (act === "dash" || act === "mini" || act === "restore") {
         dashClickGuardUntil = Date.now() + 1000;
+        return;
+      }
+      if (act === "up" || act === "down") {
+        dashClickGuardUntil = Date.now() + 1200;
+        clearAutoArm();
         return;
       }
       if (act && act !== "auto") return;
