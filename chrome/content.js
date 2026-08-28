@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.56-ext)
+ * quotexbot Chrome MV3 content script (v0.9.57-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -55,11 +55,16 @@
  * wait the remainder of ~1500ms. Do not queue captureVisibleTab while busy.
  * HUD may hold lastGoodPx 15s (no dash flash). Auto still requires a live
  * quote (OCR or Price Now) younger than 2s.
- * 0.9.56: never wipe otcBars on version bump; persist and key by fxPairKey
- * so CAD/CHF vs CAD/CHF (OTC) share history. If Price Now disagrees with the
- * cyan tag or fresh canvas OCR by rel>0.005, prefer tag/OCR (never payout).
- * Poison lastGood recovers when a new in-range v matches canvas/tag.
- * filterGarbageTicks prefers a tick cluster over a poisoned lastGood.
+ * 0.9.57: persist otcBars in chrome.storage.local (quotexbot_otc_bars) plus
+ * localStorage fallback. Never save empty otcBars over a nonempty store.
+ * Boot loads both, merges fxPairKey, delays first save until chrome get.
+ * Version bump still does NOT clear otcBars. HUD "bars · kept" only when
+ * denseBars(visible pair)>0 AND those bars came from storage restore.
+ * correctOcr ±0.1 only when v>=0.9 && v<2 (never CAD/CHF 0.58). CAD/CHF
+ * range [0.50, 0.70]. Price Now DOM wins when in-range, not payout, dec>=4
+ * for v<2; cyan OCR only if Price Now missing/frozen/payout/out of range.
+ * Poison lastGood ~0.1 (rel>5%) from in-range Price Now/tag is dropped.
+ * Do not accept OCR that is 0.1 below a live Price Now.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -600,7 +605,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.56-ext",
+    version: "0.9.57-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -646,7 +651,7 @@
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
       "USD/ARS": [800, 2500],
-      "CAD/CHF": [0.40, 0.90],
+      "CAD/CHF": [0.50, 0.70],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -661,6 +666,7 @@
   };
 
   const KEY = "quotexbot_tm_state";
+  const OTC_STORE = "quotexbot_otc_bars";
   const VER = CONFIG.version;
   const MAX_AUTO = CONFIG.maxAuto;
   const WATCH = CONFIG.watch;
@@ -703,6 +709,147 @@
   let lastMmSetLogStake = null;
   const TIME_LABELS = /\b(time|expiry|expiration|tiempo|tempo|время|সময়)\b/i;
 
+  let otcBarsMerged = false;
+  let otcBarsChromeHad = false;
+  let otcBarsKeptPairs = {};
+  let otcPersistTimer = null;
+
+  function otcBarsNonempty(obj) {
+    if (!obj || typeof obj !== "object") return false;
+    const ks = Object.keys(obj);
+    for (let i = 0; i < ks.length; i++) {
+      if (Array.isArray(obj[ks[i]]) && obj[ks[i]].length > 0) return true;
+    }
+    return false;
+  }
+  function slimOtcBar(b) {
+    if (!b || b.m == null || !isFinite(Number(b.m))) return null;
+    const o = Number(b.open), h = Number(b.high), l = Number(b.low), c = Number(b.close);
+    if (![o, h, l, c].every(isFinite)) return null;
+    return {
+      m: Number(b.m),
+      t: (b.t != null && isFinite(Number(b.t))) ? Number(b.t) : Number(b.m),
+      open: o, high: h, low: l, close: c,
+      n: Number(b.n) || 0
+    };
+  }
+  function mergeOtcBarArr(a, b) {
+    const byM = {};
+    function add(arr) {
+      if (!Array.isArray(arr)) return;
+      for (let j = 0; j < arr.length; j++) {
+        const s = slimOtcBar(arr[j]);
+        if (!s) continue;
+        if (!byM[s.m]) byM[s.m] = s;
+        else {
+          const d = byM[s.m];
+          if (s.high > d.high) d.high = s.high;
+          if (s.low < d.low) d.low = s.low;
+          d.close = s.close;
+          d.n = (d.n || 0) + (s.n || 0);
+        }
+      }
+    }
+    add(a);
+    add(b);
+    const merged = [];
+    const ms = Object.keys(byM);
+    for (let i = 0; i < ms.length; i++) merged.push(byM[ms[i]]);
+    merged.sort(function (x, y) { return x.m - y.m; });
+    return merged.length > 120 ? merged.slice(-120) : merged;
+  }
+  function mergeOtcBarMaps(a, b) {
+    const out = {};
+    function addMap(src) {
+      if (!src || typeof src !== "object") return;
+      const ks = Object.keys(src);
+      for (let i = 0; i < ks.length; i++) {
+        let canon = ks[i];
+        try { canon = fxPairKey(ks[i]) || ks[i]; } catch (_eC) {}
+        if (!canon) continue;
+        out[canon] = mergeOtcBarArr(out[canon], src[ks[i]]);
+      }
+    }
+    addMap(a);
+    addMap(b);
+    const cleaned = {};
+    const oks = Object.keys(out);
+    for (let i = 0; i < oks.length; i++) {
+      if (out[oks[i]] && out[oks[i]].length) cleaned[oks[i]] = out[oks[i]];
+    }
+    return cleaned;
+  }
+  function markOtcBarsKept(obj) {
+    if (!obj || typeof obj !== "object") return;
+    const ks = Object.keys(obj);
+    for (let i = 0; i < ks.length; i++) {
+      if (!Array.isArray(obj[ks[i]]) || !obj[ks[i]].length) continue;
+      let canon = ks[i];
+      try { canon = fxPairKey(ks[i]) || ks[i]; } catch (_eK) {}
+      otcBarsKeptPairs[canon] = true;
+    }
+  }
+  function serializeOtcBars(bars) {
+    return mergeOtcBarMaps(bars, null);
+  }
+  function persistOtcBarsNow() {
+    if (!otcBarsMerged) return;
+    let ser = {};
+    try { ser = serializeOtcBars(state && state.otcBars); } catch (_eS) { ser = {}; }
+    if (!otcBarsNonempty(ser)) {
+      /* Never save empty otcBars over a nonempty store. */
+      if (otcBarsChromeHad) return;
+      return;
+    }
+    otcBarsChromeHad = true;
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        const o = {};
+        o[OTC_STORE] = ser;
+        chrome.storage.local.set(o);
+      }
+    } catch (_eSet) {}
+  }
+  function persistOtcBarsDebounced() {
+    if (otcPersistTimer) return;
+    otcPersistTimer = setTimeout(function () {
+      otcPersistTimer = null;
+      persistOtcBarsNow();
+    }, 1000);
+  }
+  function bootMergeOtcBars() {
+    function apply(chromeBars) {
+      try {
+        const fromLs = (state && state.otcBars && typeof state.otcBars === "object") ? state.otcBars : {};
+        const fromCh = (chromeBars && typeof chromeBars === "object") ? chromeBars : {};
+        if (otcBarsNonempty(fromCh)) otcBarsChromeHad = true;
+        const merged = mergeOtcBarMaps(fromLs, fromCh);
+        markOtcBarsKept(fromLs);
+        markOtcBarsKept(fromCh);
+        if (otcBarsNonempty(merged)) state.otcBars = merged;
+        else if (otcBarsNonempty(fromCh)) state.otcBars = mergeOtcBarMaps(fromCh, null);
+        /* If in-memory otcBars is {} and storage has bars, keep storage (above). */
+        otcBarsMerged = true;
+        try { saveState(state); } catch (_eSv) {}
+        persistOtcBarsNow();
+        try { if (typeof render === "function") render(); } catch (_eR) {}
+      } catch (_eA) {
+        otcBarsMerged = true;
+      }
+    }
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && chrome.storage.local.get) {
+        chrome.storage.local.get(OTC_STORE, function (res) {
+          let val = null;
+          try { val = res && res[OTC_STORE]; } catch (_eG) {}
+          apply(val);
+        });
+        return;
+      }
+    } catch (_eBoot) {}
+    apply(null);
+  }
+
   function loadState() {
     try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_e) { return {}; }
   }
@@ -710,10 +857,25 @@
     try {
       const payload = Object.assign({}, st, { auto: false });
       if (!payload.otcBars || typeof payload.otcBars !== "object") payload.otcBars = (st && st.otcBars) || {};
+      if (!otcBarsMerged) {
+        /* Skip writing in-memory otcBars until chrome.storage.local is merged. */
+        try {
+          const prev = JSON.parse(localStorage.getItem(KEY) || "{}");
+          if (prev && otcBarsNonempty(prev.otcBars)) payload.otcBars = prev.otcBars;
+          else if (!otcBarsNonempty(payload.otcBars)) payload.otcBars = (prev && prev.otcBars) || payload.otcBars || {};
+        } catch (_ePrev) {}
+      } else if (!otcBarsNonempty(payload.otcBars)) {
+        /* Never save empty otcBars over a nonempty store. */
+        try {
+          const prev2 = JSON.parse(localStorage.getItem(KEY) || "{}");
+          if (prev2 && otcBarsNonempty(prev2.otcBars)) payload.otcBars = prev2.otcBars;
+        } catch (_ePrev2) {}
+      }
       if (/trade open|cooldown|wait(?:ing on last trade)?\s*\d+\s*s|waiting on last trade/i.test(String(payload.lastReason || ""))) {
         payload.lastReason = "";
       }
       localStorage.setItem(KEY, JSON.stringify(payload));
+      if (otcBarsMerged) persistOtcBarsDebounced();
     } catch (_e) {}
   }
 
@@ -743,7 +905,7 @@
     state.logs = [];
     state.lastReason = "";
     state.lastPair = "—";
-    /* 0.9.56: do NOT clear otcBars — keep bars across 0.9.55→0.9.56. */
+    /* 0.9.57: do NOT clear otcBars — keep bars across version bumps. */
     state.pairStats = {};
     state.hudWin = null;
     state.dashWin = null;
@@ -753,16 +915,7 @@
     lastGoodPxAt = 0;
     try { saveState(state); } catch (_e) {}
   }
-  let otcBarsKept = false;
-  try {
-    const bk = Object.keys(state.otcBars || {});
-    for (let bi = 0; bi < bk.length; bi++) {
-      if (Array.isArray(state.otcBars[bk[bi]]) && state.otcBars[bk[bi]].length > 0) {
-        otcBarsKept = true;
-        break;
-      }
-    }
-  } catch (_eKept) {}
+  try { markOtcBarsKept(state.otcBars); } catch (_eKept) {}
   state.lastPx = "—";
   state.lastGoodPx = null;
   lastGoodPxAt = 0;
@@ -775,7 +928,9 @@
       state.lastReason = "";
     }
   } catch (_eRboot) {}
+  /* Delay otcBars write until chrome.storage.local get merges (bootMergeOtcBars). */
   try { saveState(state); } catch (_eAuto) {}
+  try { bootMergeOtcBars(); } catch (_eMerge) { otcBarsMerged = true; }
 
   function log(msg) {
     const now = new Date();
@@ -2256,12 +2411,13 @@
       if (i < 0) return 0;
       return Math.min(6, t.length - i - 1);
     }
-    /* OCR often reads tenths 0↔1 / 5↔6 (1.032 ↔ 1.132). If both in range, prefer lastGoodPx else mid of range. */
+    /* OCR tenths 0↔1 (1.032 ↔ 1.132) ONLY for v in [0.9, 2). NEVER ±0.1 on CAD/CHF 0.58. */
     function correctOcr(v, range, lastGood) {
       if (v == null || !isFinite(v)) return v;
       function inRange(x) { return x >= range.lo && x <= range.hi; }
-      const tries = [v, v - 0.1, v + 0.1];
-      const tenthsAmbiguous = inRange(v) && (inRange(v + 0.1) || inRange(v - 0.1));
+      const tenthsFix = (v >= 0.9 && v < 2);
+      const tries = tenthsFix ? [v, v - 0.1, v + 0.1] : [v];
+      const tenthsAmbiguous = tenthsFix && inRange(v) && (inRange(v + 0.1) || inRange(v - 0.1));
       function nearest(target) {
         let best = v, bestD = 1e9, any = false;
         for (let i = 0; i < tries.length; i++) {
@@ -2272,6 +2428,10 @@
           if (d < bestD) { bestD = d; best = t; }
         }
         return any ? best : v;
+      }
+      if (!tenthsFix) {
+        /* Do not nearest() toward lastGood across 0.1 on 0.5x quotes. */
+        return v;
       }
       if (tenthsAmbiguous) {
         if (lastGood != null && isFinite(lastGood)) return nearest(lastGood);
@@ -2300,6 +2460,11 @@
       /* FX like NZD/USD is 5 dp (0.58105). 1.13515 (5 dp) must pass. 0.609 is 3 dp OCR garbage.
          First tick (lastGoodPx == null) must also have dec>=4 when v<2. */
       if (v < 2 && dec < 4) return false;
+      /* First tick (lastGoodPx==null): for v<1 reject if v < range.lo+small (tightened range already applied). */
+      if (state.lastGoodPx == null && v < 1) {
+        const pad = 0.01;
+        if (v < range.lo + pad) return false;
+      }
       /* mid-OTC first-tick bypass ONLY when the pair range itself is mid (DZD/PKR/BDT/JPY-like). NEVER USD/ARS. */
       const rangeIsMidOtc = range.lo >= 50 && range.hi <= 500;
       const midOtc = rangeIsMidOtc && v >= 80 && v <= 400 && dec >= 2 && dec <= 3;
@@ -2318,7 +2483,14 @@
             v >= range.lo && v <= range.hi) {
           return true;
         }
-        /* 0.9.56: lastGood poisoned vs a new in-range v that matches canvas/tag. */
+        /* Poison recovery: lastGood ~0.1 (rel>5%) from an in-range Price Now/tag. Drop 0.40x poison.
+           Do not recover toward OCR that is 0.1 below a live Price Now (info.fromOcr). */
+        const fromOcr = !!(info && typeof info === "object" && info.fromOcr);
+        if (!fromOcr && rel > 0.05 && v >= range.lo && v <= range.hi && !looksLikePayoutNotPrice(v, range)) {
+          const lastOut = state.lastGoodPx < range.lo || state.lastGoodPx > range.hi;
+          if (lastOut || abs >= 0.08) return true;
+        }
+        /* lastGood poisoned vs a new in-range v that matches canvas/tag. */
         if (rel > 0.01 && v >= range.lo && v <= range.hi && !looksLikePayoutNotPrice(v, range)) {
           let matched = false;
           if (lastCanvasOcr && lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
@@ -2379,26 +2551,8 @@
       if (isFrozenQuote(pn.v)) {
         /* fall through to canvas OCR / readLiveTagByHit */
       } else if (ok(pn.v, pn)) {
-        /* 0.9.56: if Price Now vs cyan tag / fresh OCR differ by rel>0.005, prefer tag/OCR. */
-        let prefer = null;
-        try {
-          const tg = readLiveTagByHit();
-          if (tg && tg.v != null && isFinite(tg.v)) {
-            const tv = correctOcr(tg.v, range, state.lastGoodPx);
-            if (tv >= range.lo && tv <= range.hi && !looksLikePayoutNotPrice(tv, range)) {
-              const rT = Math.abs(pn.v - tv) / Math.max(Math.abs(pn.v), Math.abs(tv), 1e-6);
-              if (rT > 0.005) prefer = tv;
-            }
-          }
-        } catch (_eC) {}
-        if (prefer == null && lastCanvasOcr && lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
-          const ocr = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
-          if (ocr != null && isFinite(ocr) && ocr >= range.lo && ocr <= range.hi && !looksLikePayoutNotPrice(ocr, range)) {
-            const rO = Math.abs(pn.v - ocr) / Math.max(Math.abs(pn.v), Math.abs(ocr), 1e-6);
-            if (rO > 0.005) prefer = ocr;
-          }
-        }
-        if (prefer != null && ok(prefer)) return acceptLivePx(prefer);
+        /* Price Now DOM wins when in range, not payout, dec>=4 for v<2.
+           Prefer cyan tag/OCR ONLY if Price Now is missing, frozen, payout-like, or out of range. */
         notePriceNowV(pn.v);
         return acceptLivePx(pn.v);
       }
@@ -2407,10 +2561,21 @@
     if (lastPriceNowOpen && state.lastGoodPx != null && lastPnAt && (Date.now() - lastPnAt) < 2000) {
       if (!looksLikePayoutNotPrice(state.lastGoodPx, range)) return state.lastGoodPx;
     }
+    function pnLiveInRange() {
+      return !!(pn && pn.v != null && isFinite(pn.v) && pn.v >= range.lo && pn.v <= range.hi
+        && !looksLikePayoutNotPrice(pn.v, range) && !isFrozenQuote(pn.v));
+    }
+    function ocrTenthBelowPn(ocrV) {
+      if (!pnLiveInRange() || ocrV == null || !isFinite(ocrV)) return false;
+      const d = pn.v - ocrV;
+      return d > 0.08 && d < 0.12;
+    }
     /* (b) last canvas-OCR value if fresh (<15s HUD hold) and ok(range) */
     if (lastCanvasOcr.v != null && (Date.now() - lastCanvasOcr.at) < 15000) {
       lastCanvasOcr.v = correctOcr(lastCanvasOcr.v, range, state.lastGoodPx);
-      if (ok(lastCanvasOcr.v, lastCanvasOcr)) {
+      if (ocrTenthBelowPn(lastCanvasOcr.v)) {
+        /* Do not accept OCR that is 0.1 below a live Price Now. */
+      } else if (ok(lastCanvasOcr.v, Object.assign({}, lastCanvasOcr, { fromOcr: true }))) {
         rememberQuotes([lastCanvasOcr.v]);
         return acceptLivePx(lastCanvasOcr.v);
       }
@@ -2419,7 +2584,9 @@
     const tag = readLiveTagByHit();
     if (tag && tag.el) bindLivePriceObserver(tag.el);
     if (tag && tag.v != null) tag.v = correctOcr(tag.v, range, state.lastGoodPx);
-    if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
+    if (tag && ocrTenthBelowPn(tag.v)) {
+      /* Do not accept OCR/tag 0.1 below a live Price Now. */
+    } else if (tag && ok(tag.v, tag) && tag.el && !inMarketList(tag.el) && !inAssetListOverlay(tag.el)) {
       rememberQuotes([tag.v]);
       return acceptLivePx(tag.v);
     }
@@ -2543,6 +2710,7 @@
       }
     }
     if (bars.length > 120) state.otcBars[canon] = bars.slice(-120);
+    try { persistOtcBarsDebounced(); } catch (_eP) {}
     return state.otcBars[canon];
   }
 
@@ -5676,7 +5844,7 @@
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
         <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; return n + "/" + CONFIG.minBarsForEma + (otcBarsKept ? " bars · kept" : " bars"); })()}</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const kept = n > 0 && !!(otcBarsKeptPairs && otcBarsKeptPairs[ck]); return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>

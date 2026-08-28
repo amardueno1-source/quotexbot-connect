@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "quotexbot",
-  "version": "0.9.56",
+  "version": "0.9.57",
   "description": "DEMO HUD on the open Quotex chart: Tesseract OCR of the cyan last-price pill. No cookies/SSID.",
   "background": {
     "service_worker": "background.js"
   },
   "permissions": [
     "tabs",
-    "offscreen"
+    "offscreen",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>",

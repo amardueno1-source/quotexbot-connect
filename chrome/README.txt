@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.56-ext
+quotexbot Chrome MV3 extension  v0.9.57-ext
 =======================================
 
 Load unpacked
@@ -50,7 +50,12 @@ last-price pill (~3x), Tesseract.js OCR offscreen. Capture waits for the
 previous OCR, then ~1500ms. After SWITCH TIME, press Escape so the
 duration list does not stay open.
 
-otcBars persist across reloads and version bumps (not wiped on 0.9.56).
-History HUD says "bars · kept" only when storage actually restored bars.
-If Price Now disagrees with the cyan last-price pill (or fresh canvas OCR)
-by more than 0.5%, HUD follows the cyan tag. Payout is never live price.
+otcBars persist in chrome.storage.local (quotexbot_otc_bars) plus localStorage
+fallback. Boot merges both; never save empty otcBars over a nonempty store.
+Version bump does not clear otcBars. History HUD says "bars · kept" only when
+denseBars of the visible pair > 0 AND those bars came from storage restore.
+If the current pair is 0, HUD shows "0/21 bars" (not a lying "kept").
+Price Now DOM wins when in range, not payout, 4+ decimals for v<2. Cyan
+tag/OCR only if Price Now is missing, frozen, payout-like, or out of range.
+correctOcr ±0.1 only for quotes in [0.9, 2) (1.032↔1.132), never CAD/CHF 0.58.
+CAD/CHF range is 0.50–0.70. Payout is never live price.
