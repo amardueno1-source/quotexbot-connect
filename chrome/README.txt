@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.58-ext
+quotexbot Chrome MV3 extension  v0.9.59-ext
 =======================================
 
 Load unpacked
@@ -63,3 +63,5 @@ History: denseBars n>=3 even if flat; never replace a longer pair array
 with a shorter snapshot. HUD n/21; "kept" only if n >= restored count.
 Trade HUD only while journal is open (settled/SKIP → —).
 Account net is sum of settled journal pnl (win +, loss −stake).
+OCR junk pairs (CGI/CHA) are ignored: not a pair change, not a History key.
+HUD keeps lastGood price up to 60s on the same chart (no invented price).

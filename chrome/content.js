@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.58-ext)
+ * quotexbot Chrome MV3 content script (v0.9.59-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -73,6 +73,11 @@
  * [0.55, 0.64]. Hold lastGood <15s instead of HUD dash. OCR ≥0.05 from
  * in-range lastGood on v<1 is rejected. Trade HUD only while journal is
  * open. tradeStats net is sum of settled pnl (win +, loss −stake).
+ * 0.9.59: isRealFxPair — AAA/BBB only if in CONFIG.ranges, WATCH labels,
+ * or sessionChartPair/lastSeenPair. OCR junk (CGI/CHA) is not a pair
+ * change: onPairChange returns without lastSeenPair or resetLivePrice.
+ * visiblePair never returns junk; ingestTicks/denseBars/HUD History use
+ * the sane pair. Hold lastGood 60s on the same chart so OTC is not —.
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -613,7 +618,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.58-ext",
+    version: "0.9.59-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -2416,6 +2421,43 @@
   function fxPairKey(label) {
     return String(label || "").replace(/\(\s*OTC\s*\)/gi, "").replace(/\s+/g, "").toUpperCase();
   }
+  /* 0.9.59: AAA/BBB only if known (ranges, WATCH, or pinned session/lastSeen). Reject CGI/CHA. */
+  function isRealFxPair(label) {
+    const raw = String(label || "");
+    const m = raw.match(/([A-Za-z]{3})\s*\/\s*([A-Za-z]{3})/);
+    if (!m) return false;
+    const k = (m[1] + "/" + m[2]).toUpperCase();
+    if (!/^[A-Z]{3}\/[A-Z]{3}$/.test(k)) return false;
+    const rangeKeys = Object.keys(CONFIG.ranges || {});
+    for (let i = 0; i < rangeKeys.length; i++) {
+      if (fxPairKey(rangeKeys[i]) === k) return true;
+    }
+    const watch = (typeof WATCH !== "undefined" && WATCH) || CONFIG.watch || [];
+    for (let i = 0; i < watch.length; i++) {
+      if (fxPairKey(watch[i] && watch[i].label) === k) return true;
+    }
+    try {
+      if (sessionChartPair && fxPairKey(sessionChartPair) === k) return true;
+    } catch (_eS) {}
+    try {
+      if (lastSeenPair && fxPairKey(lastSeenPair) === k) return true;
+    } catch (_eL) {}
+    return false;
+  }
+  function sanePairLabel(label) {
+    if (isRealFxPair(label)) return label;
+    const fb = sessionChartPair || lastSeenPair || "";
+    if (fb && isRealFxPair(fb)) return fb;
+    return fb || null;
+  }
+  function lastGoodStillHeld() {
+    if (state.lastGoodPx == null || !lastGoodPxAt) return false;
+    const age = Date.now() - lastGoodPxAt;
+    if (age < 15000) return true;
+    /* 0.9.59: same-chart OCR miss — hold lastGood to 60s (do not invent a price). */
+    if (age < 60000 && (sessionChartPair || lastSeenPair)) return true;
+    return false;
+  }
   function resetLivePrice(reason) {
     state.lastGoodPx = null;
     lastGoodPxAt = 0;
@@ -2439,6 +2481,8 @@
   }
   function onPairChange(newLabel) {
     if (!newLabel || newLabel === lastSeenPair) return;
+    /* 0.9.59: OCR junk is not a pair change — keep lastSeenPair and lastGoodPx. */
+    if (!isRealFxPair(newLabel)) return;
     const old = lastSeenPair || state.lastPair || "—";
     const sameFx = fxPairKey(old) === fxPairKey(newLabel) && fxPairKey(newLabel) !== "";
     lastSeenPair = newLabel;
@@ -2605,7 +2649,7 @@
       return v;
     }
     function holdLivePx() {
-      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
+      if (lastGoodStillHeld()) {
         if (looksLikePayoutNotPrice(state.lastGoodPx, range)) return null;
         livePxHeld = true;
         return state.lastGoodPx;
@@ -2676,7 +2720,7 @@
       rememberQuotes([tag.v]);
       return acceptLivePx(tag.v);
     }
-    /* (d) OCR miss: keep lastGoodPx if < 15000ms old (do not flash HUD —). After 15s, —. */
+    /* (d) OCR miss: keep lastGoodPx if < 15s, or < 60s on the same chart (do not flash HUD —). */
     const held = holdLivePx();
     if (held != null) return held;
     return null;
@@ -2734,8 +2778,9 @@
   }
 
   function takeOtcBars(label) {
+    label = sanePairLabel(label);
     const canon = fxPairKey(label);
-    if (!canon) return [];
+    if (!canon || !label || !isRealFxPair(label)) return [];
     if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
     const keys = Object.keys(state.otcBars);
     const extra = [];
@@ -2777,7 +2822,8 @@
 
   function ingestTicks(label, ticks) {
     ticks = filterGarbageTicks(ticks);
-    if (!label || label === "—") return [];
+    label = sanePairLabel(label);
+    if (!label || label === "—" || !isRealFxPair(label)) return [];
     const canon = fxPairKey(label);
     if (!canon) return [];
     const bars = takeOtcBars(label);
@@ -2807,6 +2853,8 @@
   }
 
   function denseBars(label) {
+    label = sanePairLabel(label);
+    if (!label) return [];
     const bars = takeOtcBars(label);
     /* Flat 15s (high==low) still counts if n>=3. Quiet buckets must not stall Need 21. */
     return bars.filter(function (b) { return (b.n || 0) >= 3; });
@@ -2957,6 +3005,7 @@
       const tClean = t.replace(/[▼▲▾▴⌄^]/g, "").replace(/\s+/g, " ").trim();
       const lab = labelFromText(tClean);
       if (!lab) continue;
+      if (!isRealFxPair(lab)) continue;
       let r;
       try { r = el.getBoundingClientRect(); } catch (_e2) { continue; }
       if (!r || r.width < 4 || r.height < 4) continue;
@@ -3007,17 +3056,21 @@
     const bestSelHeader = pick(selTitle) || pick(selHeader);
     /* ACTIVE selected tab is the open chart (OCR). Right-panel asset next.
        Never pick a leftover non-selected sibling tab. */
-    if (bestSelHeader && bestRight && fxPairKey(bestSelHeader.lab) === fxPairKey(bestRight.lab)) {
-      return bestSelHeader.lab;
+    function acceptVisiblePair(lab) {
+      if (lab && isRealFxPair(lab)) return lab;
+      return sessionChartPair || lastSeenPair || null;
     }
-    if (bestSelHeader) return bestSelHeader.lab;
-    if (bestRight) return bestRight.lab;
-    if (isAssetListOpen()) return lastSeenPair || null;
-    if (locked) return locked;
+    if (bestSelHeader && bestRight && fxPairKey(bestSelHeader.lab) === fxPairKey(bestRight.lab)) {
+      return acceptVisiblePair(bestSelHeader.lab);
+    }
+    if (bestSelHeader) return acceptVisiblePair(bestSelHeader.lab);
+    if (bestRight) return acceptVisiblePair(bestRight.lab);
+    if (isAssetListOpen()) return acceptVisiblePair(lastSeenPair);
+    if (locked) return acceptVisiblePair(locked);
     const snap = snapDoc();
     const fromSnap = labelFromText(snap && snap.asset);
-    if (fromSnap) return fromSnap;
-    return null;
+    if (fromSnap) return acceptVisiblePair(fromSnap);
+    return sessionChartPair || lastSeenPair || null;
   }
 
   async function waitForPair(label) {
@@ -3035,7 +3088,7 @@
     onPairChange(label);
     const px = readLivePrice(label);
     if (px == null) {
-      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
+      if (lastGoodStillHeld()) {
         state.lastPx = fmtPx(state.lastGoodPx, label);
         return;
       }
@@ -5931,7 +5984,7 @@
         else if (k === "Pair") {
           let v = "";
           try { v = visiblePair() || ""; } catch (_e) {}
-          b.textContent = v || state.lastPair || "—";
+          b.textContent = sanePairLabel(v || state.lastPair) || "—";
         } else if (k === "Signal") b.textContent = state.lastSignal || "—";
       }
     } catch (_e0) {}
@@ -5966,9 +6019,9 @@
       <div class="body">
         <div class="row"><span>Mode</span><b>${demo ? "DEMO" : (snap.accountMode || "—").toUpperCase()}</b></div>
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
-        <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
+        <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return sanePairLabel(v || state.lastPair || snap.asset) || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const restored = Number(otcBarsKeptPairs && otcBarsKeptPairs[ck]) || 0; const kept = restored > 0 && n >= restored; return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = sanePairLabel(lab || state.lastPair || snap.asset) || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const restored = Number(otcBarsKeptPairs && otcBarsKeptPairs[ck]) || 0; const kept = restored > 0 && n >= restored; return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
         <div class="row"><span>Trade</span><b>${hudTradeText()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
@@ -6245,7 +6298,7 @@
     const miss = { axis: 0, cand: 0 };
     const px = readLivePrice(label, miss);
     if (px == null) {
-      if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
+      if (lastGoodStillHeld()) {
         state.lastPx = fmtPx(state.lastGoodPx, label);
         if (root && root.isConnected) {
           const row = root.querySelectorAll(".row b")[3];
