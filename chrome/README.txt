@@ -1,4 +1,4 @@
-quotexbot Chrome MV3 extension  v0.9.57-ext
+quotexbot Chrome MV3 extension  v0.9.58-ext
 =======================================
 
 Load unpacked
@@ -58,4 +58,8 @@ If the current pair is 0, HUD shows "0/21 bars" (not a lying "kept").
 Price Now DOM wins when in range, not payout, 4+ decimals for v<2. Cyan
 tag/OCR only if Price Now is missing, frozen, payout-like, or out of range.
 correctOcr ±0.1 only for quotes in [0.9, 2) (1.032↔1.132), never CAD/CHF 0.58.
-CAD/CHF range is 0.50–0.70. Payout is never live price.
+CAD/CHF range is 0.55–0.64. Payout is never live price.
+History: denseBars n>=3 even if flat; never replace a longer pair array
+with a shorter snapshot. HUD n/21; "kept" only if n >= restored count.
+Trade HUD only while journal is open (settled/SKIP → —).
+Account net is sum of settled journal pnl (win +, loss −stake).

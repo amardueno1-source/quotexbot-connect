@@ -1,5 +1,5 @@
 /**
- * quotexbot Chrome MV3 content script (v0.9.57-ext)
+ * quotexbot Chrome MV3 content script (v0.9.58-ext)
  *
  * Visible-DOM scraper for the already-open Quotex trade tab / chart iframe.
  * Stay on the open chart.
@@ -65,6 +65,14 @@
  * for v<2; cyan OCR only if Price Now missing/frozen/payout/out of range.
  * Poison lastGood ~0.1 (rel>5%) from in-range Price Now/tag is dropped.
  * Do not accept OCR that is 0.1 below a live Price Now.
+ * 0.9.58: History must not drop — never assign otcBars[canon] to a shorter
+ * array (except 120-cap from the SAME array). merge/persist union by m and
+ * keep the longer pair array. denseBars counts n>=3 even when high==low.
+ * HUD n/21 shows real n; "kept" only if restored count>0 AND n>=restored.
+ * Do not ingest ticks that failed readLivePrice/ok(). CAD/CHF range
+ * [0.55, 0.64]. Hold lastGood <15s instead of HUD dash. OCR ≥0.05 from
+ * in-range lastGood on v<1 is rejected. Trade HUD only while journal is
+ * open. tradeStats net is sum of settled pnl (win +, loss −stake).
  *
  * Will not: read document.cookie, capture SSID/tokens, talk to WebSockets,
  * store email/password, call unofficial broker APIs, or load remote code.
@@ -605,7 +613,7 @@
 
   /* edit only this object for tuning — HUD, dashboard, observer, strategy all read it */
   const CONFIG = {
-    version: "0.9.57-ext",
+    version: "0.9.58-ext",
     minWaitMs: 8000,
     tradeMs: 60000,
     axisRightFrac: 0.50,
@@ -651,7 +659,7 @@
       "USD/BDT": [90, 160],
       "USD/PKR": [200, 400],
       "USD/ARS": [800, 2500],
-      "CAD/CHF": [0.50, 0.70],
+      "CAD/CHF": [0.55, 0.64],
     },
     watch: [
       { yahoo: "EURUSD=X", label: "EUR/USD" },
@@ -701,6 +709,7 @@
   let hudRenderDeferred = false;
   let dashClickGuardUntil = 0;
   let lastGoodPxAt = 0;
+  let livePxHeld = false;
   let lastCaptureAt = 0;
   let captureBusy = false;
   let captureWaiters = [];
@@ -756,7 +765,14 @@
     const ms = Object.keys(byM);
     for (let i = 0; i < ms.length; i++) merged.push(byM[ms[i]]);
     merged.sort(function (x, y) { return x.m - y.m; });
-    return merged.length > 120 ? merged.slice(-120) : merged;
+    const union = merged.length > 120 ? merged.slice(-120) : merged;
+    const aLen = Array.isArray(a) ? a.length : 0;
+    const bLen = Array.isArray(b) ? b.length : 0;
+    if (union.length >= aLen && union.length >= bLen) return union;
+    const longer = aLen >= bLen ? a : b;
+    if (!Array.isArray(longer) || !longer.length) return union;
+    /* Union by bucket m; if slim dropped bars, keep the longer source (120-cap from SAME array). */
+    return longer.length > 120 ? longer.slice(-120) : longer;
   }
   function mergeOtcBarMaps(a, b) {
     const out = {};
@@ -779,6 +795,14 @@
     }
     return cleaned;
   }
+  function denseCountArr(arr) {
+    if (!Array.isArray(arr)) return 0;
+    let n = 0;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] && (arr[i].n || 0) >= 3) n++;
+    }
+    return n;
+  }
   function markOtcBarsKept(obj) {
     if (!obj || typeof obj !== "object") return;
     const ks = Object.keys(obj);
@@ -786,29 +810,82 @@
       if (!Array.isArray(obj[ks[i]]) || !obj[ks[i]].length) continue;
       let canon = ks[i];
       try { canon = fxPairKey(ks[i]) || ks[i]; } catch (_eK) {}
-      otcBarsKeptPairs[canon] = true;
+      const n = denseCountArr(obj[ks[i]]);
+      if (n <= 0) continue;
+      const prev = Number(otcBarsKeptPairs[canon]) || 0;
+      if (n > prev) otcBarsKeptPairs[canon] = n;
     }
   }
   function serializeOtcBars(bars) {
     return mergeOtcBarMaps(bars, null);
   }
+  function assignOtcPairBars(canon, next, fromSameCap) {
+    if (!canon) return;
+    if (!state.otcBars || typeof state.otcBars !== "object") state.otcBars = {};
+    const cur = state.otcBars[canon];
+    if (!Array.isArray(next)) {
+      if (!Array.isArray(cur)) state.otcBars[canon] = [];
+      return;
+    }
+    /* Never replace a longer in-memory pair array with a shorter snapshot.
+       120-cap slice from the SAME array is the only allowed shrink. */
+    if (Array.isArray(cur) && next.length < cur.length && !fromSameCap) return;
+    state.otcBars[canon] = next;
+  }
+  function applyOtcBarsKeepLonger(nextMap) {
+    if (!nextMap || typeof nextMap !== "object") return;
+    if (!state.otcBars || typeof state.otcBars !== "object") {
+      state.otcBars = nextMap;
+      return;
+    }
+    const cur = state.otcBars;
+    const union = mergeOtcBarMaps(cur, nextMap);
+    const ks = Object.keys(cur);
+    for (let i = 0; i < ks.length; i++) {
+      let canon = ks[i];
+      try { canon = fxPairKey(ks[i]) || ks[i]; } catch (_eC) {}
+      if (!canon) continue;
+      const prev = cur[ks[i]];
+      const nxt = union[canon];
+      if (Array.isArray(prev) && (!nxt || nxt.length <= prev.length)) {
+        /* Keep the same in-memory array when the snapshot is not strictly longer. */
+        union[canon] = prev.length > 120 ? prev.slice(-120) : prev;
+      }
+    }
+    state.otcBars = union;
+  }
   function persistOtcBarsNow() {
     if (!otcBarsMerged) return;
     let ser = {};
     try { ser = serializeOtcBars(state && state.otcBars); } catch (_eS) { ser = {}; }
-    if (!otcBarsNonempty(ser)) {
-      /* Never save empty otcBars over a nonempty store. */
-      if (otcBarsChromeHad) return;
-      return;
-    }
-    otcBarsChromeHad = true;
-    try {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        const o = {};
-        o[OTC_STORE] = ser;
-        chrome.storage.local.set(o);
+    function writeSer(finalSer) {
+      if (!otcBarsNonempty(finalSer)) {
+        /* Never save empty otcBars over a nonempty store. */
+        if (otcBarsChromeHad) return;
+        return;
       }
-    } catch (_eSet) {}
+      otcBarsChromeHad = true;
+      try {
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+          const o = {};
+          o[OTC_STORE] = finalSer;
+          chrome.storage.local.set(o);
+        }
+      } catch (_eSet) {}
+    }
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && chrome.storage.local.get) {
+        chrome.storage.local.get(OTC_STORE, function (res) {
+          let stored = null;
+          try { stored = res && res[OTC_STORE]; } catch (_eG) {}
+          let merged = ser;
+          try { merged = mergeOtcBarMaps(stored, ser); } catch (_eM) { merged = ser; }
+          writeSer(merged);
+        });
+        return;
+      }
+    } catch (_eGet) {}
+    writeSer(ser);
   }
   function persistOtcBarsDebounced() {
     if (otcPersistTimer) return;
@@ -826,9 +903,9 @@
         const merged = mergeOtcBarMaps(fromLs, fromCh);
         markOtcBarsKept(fromLs);
         markOtcBarsKept(fromCh);
-        if (otcBarsNonempty(merged)) state.otcBars = merged;
-        else if (otcBarsNonempty(fromCh)) state.otcBars = mergeOtcBarMaps(fromCh, null);
-        /* If in-memory otcBars is {} and storage has bars, keep storage (above). */
+        if (otcBarsNonempty(merged)) applyOtcBarsKeepLonger(merged);
+        else if (otcBarsNonempty(fromCh)) applyOtcBarsKeepLonger(mergeOtcBarMaps(fromCh, null));
+        /* Never replace a longer in-memory pair array with a shorter snapshot. */
         otcBarsMerged = true;
         try { saveState(state); } catch (_eSv) {}
         persistOtcBarsNow();
@@ -905,7 +982,7 @@
     state.logs = [];
     state.lastReason = "";
     state.lastPair = "—";
-    /* 0.9.57: do NOT clear otcBars — keep bars across version bumps. */
+    /* 0.9.58: do NOT clear otcBars — keep bars across version bumps. */
     state.pairStats = {};
     state.hudWin = null;
     state.dashWin = null;
@@ -2342,6 +2419,7 @@
   function resetLivePrice(reason) {
     state.lastGoodPx = null;
     lastGoodPxAt = 0;
+    livePxHeld = false;
     state.lastPx = "—";
     lastObservedPx = null;
     lastAxisEl = null;
@@ -2391,6 +2469,7 @@
 
   function readLivePrice(pairLabel, diag) {
     onPairChange(pairLabel);
+    livePxHeld = false;
     const range = priceRange(pairLabel);
     function quoteDecimals(v, text) {
       if (text) {
@@ -2486,6 +2565,11 @@
         /* Poison recovery: lastGood ~0.1 (rel>5%) from an in-range Price Now/tag. Drop 0.40x poison.
            Do not recover toward OCR that is 0.1 below a live Price Now (info.fromOcr). */
         const fromOcr = !!(info && typeof info === "object" && info.fromOcr);
+        /* Do not ingest/display OCR ≥0.05 away from lastGood on v<1 if lastGood is already in-range (0.59 vs 0.50x). */
+        if (fromOcr && v < 1 && abs >= 0.05) {
+          const lastIn = state.lastGoodPx >= range.lo && state.lastGoodPx <= range.hi;
+          if (lastIn) return false;
+        }
         if (!fromOcr && rel > 0.05 && v >= range.lo && v <= range.hi && !looksLikePayoutNotPrice(v, range)) {
           const lastOut = state.lastGoodPx < range.lo || state.lastGoodPx > range.hi;
           if (lastOut || abs >= 0.08) return true;
@@ -2514,6 +2598,7 @@
       return true;
     }
     function acceptLivePx(v) {
+      livePxHeld = false;
       state.lastGoodPx = v;
       lastGoodPxAt = Date.now();
       otcMissLogged = false;
@@ -2522,6 +2607,7 @@
     function holdLivePx() {
       if (state.lastGoodPx != null && lastGoodPxAt && (Date.now() - lastGoodPxAt) < 15000) {
         if (looksLikePayoutNotPrice(state.lastGoodPx, range)) return null;
+        livePxHeld = true;
         return state.lastGoodPx;
       }
       return null;
@@ -2683,9 +2769,9 @@
       const ms = Object.keys(byM);
       for (let i = 0; i < ms.length; i++) merged.push(byM[ms[i]]);
       merged.sort(function (a, b) { return a.m - b.m; });
-      state.otcBars[canon] = merged.length > 120 ? merged.slice(-120) : merged;
+      assignOtcPairBars(canon, merged.length > 120 ? merged.slice(-120) : merged, merged.length > 120);
     }
-    if (!Array.isArray(state.otcBars[canon])) state.otcBars[canon] = [];
+    if (!Array.isArray(state.otcBars[canon])) assignOtcPairBars(canon, []);
     return state.otcBars[canon];
   }
 
@@ -2698,6 +2784,12 @@
     const bucket = Math.floor(Date.now() / CONFIG.barBucketMs);
     for (let i = 0; i < ticks.length; i++) {
       const px = ticks[i];
+      if (px == null || !isFinite(px)) continue;
+      /* Do not ingest ticks that failed readLivePrice/ok() — garbage 0.50 must not enter bars. */
+      if (livePxHeld) continue;
+      if (state.lastGoodPx != null && isFinite(state.lastGoodPx) && px < 1) {
+        if (Math.abs(px - state.lastGoodPx) >= 0.05) continue;
+      }
       let bar = bars.length && bars[bars.length - 1].m === bucket ? bars[bars.length - 1] : null;
       if (!bar) {
         bar = { m: bucket, t: bucket * (CONFIG.barBucketMs / 1000), open: px, high: px, low: px, close: px, n: 1 };
@@ -2709,14 +2801,15 @@
         bar.n = (bar.n || 1) + 1;
       }
     }
-    if (bars.length > 120) state.otcBars[canon] = bars.slice(-120);
+    if (bars.length > 120) assignOtcPairBars(canon, bars.slice(-120), true);
     try { persistOtcBarsDebounced(); } catch (_eP) {}
     return state.otcBars[canon];
   }
 
   function denseBars(label) {
     const bars = takeOtcBars(label);
-    return bars.filter(function (b) { return (b.n || 0) >= 3 && (b.high - b.low) > 0; });
+    /* Flat 15s (high==low) still counts if n>=3. Quiet buckets must not stall Need 21. */
+    return bars.filter(function (b) { return (b.n || 0) >= 3; });
   }
 
   function barCount(label) {
@@ -3733,9 +3826,22 @@
     let wins = 0, losses = 0, pending = 0, net = 0, profit = 0;
     for (let i = 0; i < taken.length; i++) {
       const x = taken[i];
-      if (x.result === "win") { wins += 1; const n = Number(x.pnl) || 0; net += n; profit += n; }
-      else if (x.result === "loss") { losses += 1; net += Number(x.pnl) || 0; }
-      else pending += 1;
+      if (x.result === "win") {
+        wins += 1;
+        const n = Number(x.pnl);
+        const add = (isFinite(n) && n > 0) ? n : 0;
+        net += add;
+        profit += add;
+      } else if (x.result === "loss") {
+        losses += 1;
+        const n = Number(x.pnl);
+        const st = Number(x.stake);
+        let add = 0;
+        if (isFinite(n) && n < 0) add = n;
+        else if (isFinite(st) && st > 0) add = -Math.abs(st);
+        else if (isFinite(n) && n > 0) add = -n;
+        net += add;
+      } else pending += 1;
     }
     return { total: taken.length, wins: wins, losses: losses, pending: pending, net: net, profit: profit };
   }
@@ -4142,6 +4248,24 @@
       if (j[i] && j[i].ok) return j[i];
     }
     return null;
+  }
+  function hudTradeText() {
+    /* Show journal Trade only while open (!result). Settled or SKIP → "—" unless a real open trade has an open journal row. */
+    const j = lastOkJournal();
+    if (j && !j.result) {
+      return (j.pos || j.signal || "—") + " · " + fmtDur(j) + " · open";
+    }
+    try {
+      if (realTradeOpenNow()) {
+        const jj = state.journal || [];
+        for (let i = jj.length - 1; i >= 0; i--) {
+          if (jj[i] && jj[i].ok && !jj[i].result) {
+            return (jj[i].pos || jj[i].signal || "—") + " · " + fmtDur(jj[i]) + " · open";
+          }
+        }
+      }
+    } catch (_eT) {}
+    return "—";
   }
   function settlePendingJournal() {
     if (!Array.isArray(state.journal) || !state.journal.length) return;
@@ -5844,9 +5968,9 @@
         <div class="row"><span>Browse</span><b>switch off · one chart</b></div>
         <div class="row"><span>Pair</span><b>${(function(){ let v=""; try { v=visiblePair()||""; } catch(_e){} return v || state.lastPair || snap.asset || "—"; })()}</b></div>
         <div class="row"><span>OTC price</span><b>${state.lastPx || "—"}</b></div>
-        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const kept = n > 0 && !!(otcBarsKeptPairs && otcBarsKeptPairs[ck]); return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
+        <div class="row"><span>History</span><b>${(function(){ let lab=""; try { lab=visiblePair()||""; } catch(_e){} lab = lab || state.lastPair || snap.asset || ""; const n = denseBars(lab).length; let ck = ""; try { ck = fxPairKey(lab) || ""; } catch (_eK) {} const restored = Number(otcBarsKeptPairs && otcBarsKeptPairs[ck]) || 0; const kept = restored > 0 && n >= restored; return n + "/" + CONFIG.minBarsForEma + (kept ? " bars · kept" : " bars"); })()}</b></div>
         <div class="row"><span>Signal</span><b>${state.lastSignal}</b></div>
-        <div class="row"><span>Trade</span><b>${(function(){ const j = lastOkJournal(); if (!j) return "—"; return (j.pos || j.signal || "—") + " · " + fmtDur(j) + (j.result ? "" : " · open"); })()}</b></div>
+        <div class="row"><span>Trade</span><b>${hudTradeText()}</b></div>
         <div class="row"><span>Auto</span><b>${state.auto ? "ON " + state.autoCount + "/" + MAX_AUTO : "OFF"}</b></div>
         <div class="row"><span>Account</span><b>${(function(){ const s = tradeStats(); return s.total + " trades · Profit " + s.wins + " · Loss " + s.losses + " · " + fmtMoney(s.net); })()}</b></div>
         <div class="row"><span>Stake</span><b>${mmHudText()}</b></div>
